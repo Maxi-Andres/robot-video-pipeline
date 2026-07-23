@@ -77,9 +77,26 @@ cd ~/Desktop/robot-nvr-bridge
 
 ### Prender todo
 ```bash
-./start-all.sh      # levanta el pipeline (mediamtx+captura+ffmpeg) y el NVR Frigate
+./start-all.sh      # levanta el pipeline (como servicio) y el NVR Frigate
 ```
-El robot tiene que estar encendido y en red (`ping 192.168.123.161`).
+La primera vez, `start-all.sh` instala el pipeline como **servicio systemd de usuario**
+(`robot-nvr.service`) con `Restart=always`, así queda **siempre prendido**: se
+reinicia solo si falla y **se recupera solo cuando el robot se cae y vuelve** (no hay
+que relanzar nada a mano). Frigate ya se reinicia solo vía Docker (`restart:
+unless-stopped`).
+
+### Que arranque al bootear la PC (una vez, con sudo)
+El servicio de usuario arranca al iniciar sesión. Para que además levante **al prender
+la computadora sin que nadie loguee**, hay que habilitar *lingering* una sola vez:
+```bash
+sudo loginctl enable-linger $USER
+```
+
+### Ver / diagnosticar el servicio
+```bash
+systemctl --user status robot-nvr.service       # estado
+journalctl --user -u robot-nvr.service -f        # logs en vivo
+```
 
 ### Ver la cámara
 - **NVR / monitoreo + grabaciones (recomendado):** `http://192.168.123.99:5000`
@@ -170,8 +187,10 @@ robot-nvr-bridge/
 │   └── go2_h264_stream.cpp   ← intento de H.264 nativo (NO funciona en este robot, ver §8)
 ├── setup.sh                  ← descarga mediamtx + ffmpeg (no versionados)
 ├── build.sh                  ← compila los programas C++
-├── run.sh                    ← levanta mediamtx + captura + ffmpeg
-├── start-all.sh / stop-all.sh← prende / apaga TODO (pipeline + NVR)
+├── run.sh                    ← supervisor: mediamtx + captura + ffmpeg (auto-reinicio)
+├── install-service.sh        ← instala el pipeline como servicio systemd (siempre prendido)
+├── systemd/robot-nvr.service ← definición del servicio
+├── start-all.sh / stop-all.sh← prende / apaga TODO (servicio + NVR)
 ├── mediamtx  + mediamtx.yml  ← servidor de streaming + su config
 ├── mediamtx.stock.yml        ← config completa de referencia de mediamtx
 ├── bin/ffmpeg  bin/ffprobe   ← binarios estáticos (no se instalan en el sistema)

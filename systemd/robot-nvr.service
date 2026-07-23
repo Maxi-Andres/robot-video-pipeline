@@ -1,0 +1,15 @@
+[Unit]
+Description=Robot NVR pipeline (Go2 camera -> RTSP for Frigate)
+# run.sh handles its own retries, so no hard ordering deps are needed.
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Desktop/robot-nvr-bridge
+ExecStart=%h/Desktop/robot-nvr-bridge/run.sh
+Restart=always
+RestartSec=3
+KillMode=mixed
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

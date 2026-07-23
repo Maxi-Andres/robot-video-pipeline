@@ -44,6 +44,12 @@ int main(int argc, char** argv) {
     vc.SetTimeout(1.0f);
     vc.Init();
 
+    // Exit (non-zero) after this many seconds without a frame so the supervisor in
+    // run.sh restarts the capture->encode->publish chain fresh — this is what makes
+    // the stream self-heal when the robot drops off the network and comes back.
+    const long noframe_timeout = getenv("NOFRAME_TIMEOUT_S") ? atol(getenv("NOFRAME_TIMEOUT_S")) : 8;
+    time_t last_ok = time(nullptr);
+
     std::vector<uint8_t> img, prev;
     long sent = 0, empty = 0;
     while (true) {
@@ -51,9 +57,15 @@ int main(int argc, char** argv) {
         int r = vc.GetImageSample(img);
         if (r != 0 || img.size() < 4 || img[0] != 0xFF || img[1] != 0xD8) {
             if (++empty % 30 == 0) fprintf(stderr, "[go2_jpeg_stream] no frame (ret=%d)\n", r);
+            if (time(nullptr) - last_ok >= noframe_timeout) {
+                fprintf(stderr, "[go2_jpeg_stream] no frames for %lds — exiting for restart\n",
+                        noframe_timeout);
+                return 2;
+            }
             nsleep(20 * 1000 * 1000);  // 20 ms backoff on a miss
             continue;
         }
+        last_ok = time(nullptr);
         // Skip byte-identical repeats (the service can return the same frame if we
         // poll faster than the camera updates) so we don't feed ffmpeg duplicates.
         if (img.size() == prev.size() && memcmp(img.data(), prev.data(), img.size()) == 0) {

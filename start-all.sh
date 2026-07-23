@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
-# Start the whole stack: the robot->RTSP pipeline (detached) + the Frigate NVR.
-#   Frigate UI:  http://<this-host-ip>:5000   (no login)
+# Start the whole stack: the robot->RTSP pipeline (as an always-on systemd service)
+# + the Frigate NVR. Safe to run repeatedly.
+#   Frigate UI:  http://<this-host-ip>:5000
 set -euo pipefail
 cd "$(dirname "$0")"
-HERE="$(pwd)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 ROBOT_IP="${ROBOT_IP:-192.168.123.161}"
 
 if ! ping -c1 -W2 "$ROBOT_IP" >/dev/null 2>&1; then
-  echo "WARNING: robot $ROBOT_IP not reachable — the camera stream will be empty until it is up." >&2
+  echo "WARNING: robot $ROBOT_IP not reachable — the stream stays empty until it is up" >&2
+  echo "         (the pipeline will recover on its own once the robot is back)." >&2
 fi
 
-# 1. Source pipeline (mediamtx + go2_jpeg_stream + ffmpeg). Detached so it survives
-#    this shell; skipped if already running.
-if pgrep -f "$HERE/go2_jpeg_stream" >/dev/null 2>&1; then
-  echo "[start] pipeline already running"
+# 1. Pipeline as a supervised systemd user service (auto-restart / self-heal).
+if systemctl --user cat robot-nvr.service >/dev/null 2>&1; then
+  systemctl --user start robot-nvr.service
 else
-  echo "[start] launching robot -> RTSP pipeline"
-  setsid bash -c "$HERE/run.sh > /tmp/robot-nvr-run.log 2>&1" </dev/null >/dev/null 2>&1 &
-  disown
-  sleep 6
+  echo "[start] first run — installing the systemd service"
+  ./install-service.sh
 fi
 
 # 2. Frigate NVR.
