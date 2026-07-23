@@ -1,0 +1,34 @@
+# Frigate NVR config — records + monitors the Go2 camera published by mediamtx.
+# Source chain:  robot -> go2_jpeg_stream -> ffmpeg -> mediamtx (:8554/robot) -> Frigate
+version: 0.14
+
+mqtt:
+  enabled: false
+
+# CPU object detector (no Coral/GPU needed). Fine for one camera at low fps.
+detectors:
+  cpu1:
+    type: cpu
+
+cameras:
+  robot:
+    ffmpeg:
+      inputs:
+        # mediamtx runs on the host; reach it by the host's robot-network IP.
+        - path: rtsp://192.168.123.99:8554/robot
+          roles:
+            - detect
+            - record
+      input_args: preset-rtsp-generic   # our stream is H.264 over RTSP/TCP
+    detect:
+      enabled: true
+      width: 1920
+      height: 1080
+      fps: 5            # detection rate; recording keeps the full stream fps
+    record:
+      enabled: true
+      retain:
+        days: 3
+        mode: all       # keep continuous footage, not just events
+    snapshots:
+      enabled: true

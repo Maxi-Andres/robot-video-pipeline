@@ -1,0 +1,28 @@
+# Frigate NVR for the robot camera. Reads the mediamtx RTSP stream produced by
+# ../run.sh, records it, and serves a web UI for monitoring.
+#
+#   Web UI (no login):  http://192.168.123.99:5000
+#   Web UI (auth):      http://192.168.123.99:8971
+#
+# Start:  docker compose up -d      (from this frigate/ folder; ../run.sh must be up)
+# Logs:   docker compose logs -f
+# Stop:   docker compose down
+services:
+  frigate:
+    container_name: frigate
+    image: ghcr.io/blakeblackshear/frigate:0.14.1
+    restart: unless-stopped
+    shm_size: "256mb"
+    environment:
+      # Match the host timezone so recording/UI timestamps are local, not UTC.
+      TZ: America/Argentina/Buenos_Aires
+    volumes:
+      - ./config:/config
+      - ./media:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      - "5000:5000"      # unauthenticated LAN UI
+      - "8971:8971"      # authenticated UI

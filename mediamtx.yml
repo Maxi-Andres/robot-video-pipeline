@@ -1,0 +1,32 @@
+# Minimal low-latency mediamtx config for the robot -> NVR bridge.
+# Omitted keys fall back to mediamtx's built-in defaults. Full reference config is
+# kept alongside as mediamtx.stock.yml.
+
+logLevel: info
+
+# --- RTSP: what the NVR pulls, and what our ffmpeg pushes to ---
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp, udp]
+
+# --- HLS: browser fallback (no NVR needed) -> http://<host>:8888/robot ---
+hls: yes
+hlsAddress: :8888
+hlsVariant: lowLatency
+
+# --- WebRTC: lowest-latency browser view -> http://<host>:8889/robot ---
+webrtc: yes
+webrtcAddress: :8889
+
+# Unused ingress/servers off.
+rtmp: no
+srt: no
+api: no
+metrics: no
+pprof: no
+
+paths:
+  # ffmpeg publishes to rtsp://127.0.0.1:8554/robot; NVR / VLC / browser read the
+  # same path. source: publisher = the stream is pushed to us (not pulled by us).
+  robot:
+    source: publisher

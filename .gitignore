@@ -1,0 +1,21 @@
+# --- Downloaded binaries (recreate with ./setup.sh) ---
+/bin/
+/mediamtx
+/mediamtx.stock.yml
+
+# --- Compiled programs (recreate with ./build.sh) ---
+/go2_jpeg_stream
+/go2_h264_stream
+*.o
+
+# --- mediamtx auto-generated TLS certs ---
+/auto.crt
+/auto.key
+
+# --- Frigate runtime data: keep only the config we wrote ---
+/frigate/media/
+/frigate/config/*
+!/frigate/config/config.yml
+
+# --- misc ---
+*.log
