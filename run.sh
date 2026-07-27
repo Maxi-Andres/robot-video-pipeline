@@ -45,10 +45,14 @@ while [ "$running" = 1 ]; do
   # go2_jpeg_stream exits after a few seconds without frames (robot offline); ffmpeg
   # then gets EOF and exits. The loop restarts the pair, so the stream re-publishes
   # cleanly as soon as the robot is back.
+  # NOTE: force constant output rate (-vsync cfr -r 15). Without it, the JPEG frames'
+  # wallclock timestamps arrive irregularly (esp. the G1) and ffmpeg stalls its RTSP
+  # output -> mediamtx drops the publisher with an i/o timeout and the stream dies a
+  # few seconds after starting. CFR normalizes the cadence and keeps the publish alive.
   ./go2_jpeg_stream "$NIC" "$MAXFPS" | "$FFMPEG" -hide_banner -loglevel warning \
-    -fflags nobuffer -flags low_delay \
     -f mjpeg -use_wallclock_as_timestamps 1 -i pipe:0 \
-    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p -g 30 \
+    -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
+    -vsync cfr -r 15 -g 15 \
     -f rtsp -rtsp_transport tcp "$RTSP" || true
 
   [ "$running" = 1 ] && { echo "[run] capture ended; retry in 3s" >&2; sleep 3; }
