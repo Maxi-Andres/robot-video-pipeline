@@ -19,3 +19,4 @@
 
 # --- misc ---
 *.log
+robot/video.env

@@ -1,8 +1,9 @@
 # Robot-side video publisher, for the robot's own Jetson.
+#   cp robot/video.env.example robot/video.env   # then set PUBLISH_HOST
 #   sudo cp robot/robot-video.service /etc/systemd/system/
 #   sudo systemctl enable --now robot-video
 [Unit]
-Description=Robot camera -> SRT publish to mediamtx
+Description=Robot camera -> RTMP publish to mediamtx
 After=network-online.target
 Wants=network-online.target
 StartLimitBurst=5
@@ -11,13 +12,17 @@ StartLimitIntervalSec=120
 [Service]
 User=unitree
 WorkingDirectory=/home/unitree/robot-nvr-bridge
+# Defaults first, then the config file — systemd applies these IN ORDER and the last one
+# wins, so EnvironmentFile MUST come after the Environment lines or the file would be
+# silently ignored for any key also listed here.
 Environment=NIC=eth0
 Environment=MAXFPS=15
-Environment=PUBLISH_HOST=192.168.123.99
 Environment=PROTO=rtmp
 Environment=STREAM=robot
 Environment=BITRATE=2000000
-Environment=LATENCY=300
+# PUBLISH_HOST has no default on purpose: run-video.sh refuses to start without it, which
+# is a clear error instead of silently publishing nowhere. Set it in video.env.
+EnvironmentFile=-/home/unitree/robot-nvr-bridge/robot/video.env
 ExecStart=/home/unitree/robot-nvr-bridge/robot/run-video.sh
 Restart=always
 RestartSec=5
