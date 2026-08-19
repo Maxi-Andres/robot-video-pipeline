@@ -22,7 +22,9 @@ webrtcAddress: :8889
 rtmp: yes
 rtmpAddress: :1935   # robot-side publisher (libsrt 1.4.0 on the robot is incompatible with mediamtx SRT)
 srt: yes
-srtAddress: :8890   # robot-side publisher pushes here (see robot/run-video.sh)
+srtAddress: :8890   # enabled but UNUSABLE from the robot: its libsrt 1.4.0 is incompatible
+                    # with mediamtx SRT. The robot publishes over RTMP instead. See
+                    # robot/run-video.sh for the bisect that proved it.
 api: no
 metrics: no
 pprof: no
