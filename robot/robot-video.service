@@ -13,8 +13,8 @@ User=unitree
 WorkingDirectory=/home/unitree/robot-nvr-bridge
 Environment=NIC=eth0
 Environment=MAXFPS=15
-Environment=SRT_HOST=192.168.123.99
-Environment=SRT_PORT=8890
+Environment=PUBLISH_HOST=192.168.123.99
+Environment=PROTO=rtmp
 Environment=STREAM=robot
 Environment=BITRATE=2000000
 Environment=LATENCY=300

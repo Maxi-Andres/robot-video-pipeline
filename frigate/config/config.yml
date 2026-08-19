@@ -15,7 +15,7 @@ cameras:
     ffmpeg:
       inputs:
         # mediamtx runs on the host; reach it by the host's robot-network IP.
-        - path: rtsp://192.168.123.99:8554/robot
+        - path: rtsp://192.168.20.99:8554/robot
           roles:
             - detect
             - record
