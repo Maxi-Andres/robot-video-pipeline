@@ -20,7 +20,8 @@ webrtcAddress: :8889
 
 # Unused ingress/servers off.
 rtmp: no
-srt: no
+srt: yes
+srtAddress: :8890   # robot-side publisher pushes here (see robot/run-video.sh)
 api: no
 metrics: no
 pprof: no

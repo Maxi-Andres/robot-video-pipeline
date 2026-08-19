@@ -1,0 +1,31 @@
+# Robot-side video publisher, for the robot's own Jetson.
+#   sudo cp robot/robot-video.service /etc/systemd/system/
+#   sudo systemctl enable --now robot-video
+[Unit]
+Description=Robot camera -> SRT publish to mediamtx
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Service]
+User=unitree
+WorkingDirectory=/home/unitree/robot-nvr-bridge
+Environment=NIC=eth0
+Environment=MAXFPS=15
+Environment=SRT_HOST=192.168.123.99
+Environment=SRT_PORT=8890
+Environment=STREAM=robot
+Environment=BITRATE=2000000
+Environment=LATENCY=300
+ExecStart=/home/unitree/robot-nvr-bridge/robot/run-video.sh
+Restart=always
+RestartSec=5
+# Video encode is hardware-accelerated, so this stays cheap — but cap it anyway: nothing
+# on this machine may compete with the robot's control stack.
+MemoryMax=512M
+CPUQuota=50%
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
