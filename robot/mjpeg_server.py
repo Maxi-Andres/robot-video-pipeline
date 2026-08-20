@@ -219,6 +219,10 @@ PUBLISH = None      # set in main(): RAW.put when resizing, LATEST.put when not
 # on ("no frames have been received"). A DECODER tolerates dropped frames; an ENCODER needs a
 # cadence. So pick frames on a fixed interval instead, and keep the bounded queue only as a
 # safety net for a genuine stall.
+# Set NVR_ENABLE=0 to stop feeding the recording branch entirely. Exists for diagnosis: the
+# two branches share one uplink, so turning this off is the one-step way to tell whether a
+# live-view stall is caused by the recorder competing for bandwidth.
+NVR_ENABLE = os.environ.get("NVR_ENABLE", "1") != "0"
 NVR_FPS = float(os.environ.get("NVR_FPS", "5"))
 NVR_MAX = int(os.environ.get("NVR_QUEUE", "8"))
 _nvr_last = 0.0
@@ -230,6 +234,8 @@ _nvr_dropped = 0
 def nvr_offer(frame):
     """Offer a frame to the recording branch at a steady rate. Never blocks the caller."""
     global _nvr_dropped, _nvr_last
+    if not NVR_ENABLE:
+        return
     if NVR_FPS > 0:
         now = time.monotonic()
         if now - _nvr_last < 1.0 / NVR_FPS:
