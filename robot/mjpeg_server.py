@@ -14,6 +14,13 @@ on purpose. This restores the short path with HTTP instead of DDS as the transpo
 works with the robot on any network, and leaves the H.264/RTMP path untouched for recording —
 where latency does not matter.
 
+The recording branch CANNOT throttle the live branch. rtmpsink blocks when the uplink is
+full, GStreamer then stops reading its stdin, the pipe fills, and a blocking write here used
+to propagate that stall all the way back into the camera capture — measured, 14 fps of capture
+collapsing to 5.9 because the NVR could not keep up. Frames for the NVR now go through a
+bounded queue and the OLDEST is dropped when it overflows: the recorder degrades, nothing else
+does.
+
 Latency discipline, and it is the whole point of this file:
   * ONE frame of state. Only the newest JPEG is kept; there is no queue to fall behind in.
   * A slow client SKIPS frames instead of delaying everyone. Nothing is ever buffered for it.
@@ -25,6 +32,7 @@ Latency discipline, and it is the whole point of this file:
 
 Standard library only (Python 3.8 on the robot).
 """
+import collections
 import os
 import socket
 import sys
@@ -144,8 +152,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._snapshot()
         if path == "/health":
             body = (
-                b'{"ok":true,"clients":%d,"fps_cap":%s,"width":%d,"quality":%d}'
-                % (LATEST.clients, str(FPS or "none").encode(), WIDTH, QUALITY)
+                b'{"ok":true,"clients":%d,"fps_cap":%s,"width":%d,"quality":%d,'
+                b'"nvr_queue":%d,"nvr_dropped":%d}'
+                % (LATEST.clients, str(FPS or "none").encode(), WIDTH, QUALITY,
+                   len(_nvr), _nvr_dropped)
             )
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -201,6 +211,41 @@ class Handler(BaseHTTPRequestHandler):
 
 PUBLISH = None      # set in main(): RAW.put when resizing, LATEST.put when not
 
+# Whole frames waiting to go downstream (the NVR). Bounded on purpose: the point is to drop
+# rather than to wait. Small, because a deep queue would only add latency to the recording
+# without ever helping — the uplink is the limit, not a temporary hiccup.
+NVR_MAX = int(os.environ.get("NVR_QUEUE", "8"))
+_nvr = collections.deque()
+_nvr_cv = threading.Condition()
+_nvr_dropped = 0
+
+
+def nvr_offer(frame):
+    """Hand a whole frame to the writer thread. Never blocks; drops the oldest if full."""
+    global _nvr_dropped
+    with _nvr_cv:
+        while len(_nvr) >= NVR_MAX:
+            _nvr.popleft()
+            _nvr_dropped += 1
+        _nvr.append(frame)
+        _nvr_cv.notify()
+
+
+def nvr_writer():
+    """The only thing allowed to block on stdout."""
+    dst = sys.stdout.buffer
+    while True:
+        with _nvr_cv:
+            while not _nvr:
+                _nvr_cv.wait(5.0)
+            frame = _nvr.popleft()
+        try:
+            dst.write(frame)
+            dst.flush()
+        except (BrokenPipeError, OSError):
+            log("downstream (NVR) closed")
+            return
+
 
 def pump():
     """stdin -> stdout passthrough, publishing each JPEG as it goes by.
@@ -209,7 +254,6 @@ def pump():
     makes this composable with go2_jpeg_stream's raw concatenated output.
     """
     src = sys.stdin.buffer
-    dst = sys.stdout.buffer
     buf = b""
     frames = 0
     t0 = time.monotonic()
@@ -222,9 +266,6 @@ def pump():
         if not chunk:
             log("stdin closed, exiting")
             return
-        # Forward FIRST, always: the recording path must never depend on the HTTP half.
-        dst.write(chunk)
-        dst.flush()
         buf += chunk
         while True:
             start = buf.find(b"\xff\xd8")
@@ -236,12 +277,16 @@ def pump():
                 if start > 0:
                     buf = buf[start:]
                 break
-            PUBLISH(buf[start:end + 2])
+            frame = buf[start:end + 2]
             buf = buf[end + 2:]
+            # Live first: it is the branch whose latency we care about.
+            PUBLISH(frame)
+            nvr_offer(frame)
             frames += 1
             if frames % 300 == 0:
                 dt = time.monotonic() - t0
-                log(f"{frames} frames, {frames / dt:.1f} fps in, {LATEST.clients} viewer(s)")
+                log(f"{frames} frames, {frames / dt:.1f} fps in, "
+                    f"{LATEST.clients} viewer(s), {_nvr_dropped} dropped to NVR")
 
 
 def main():
@@ -254,6 +299,7 @@ def main():
         # Nothing to do per frame: publish straight to the served slot.
         PUBLISH = LATEST.put
 
+    threading.Thread(target=nvr_writer, name="nvr-writer", daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
