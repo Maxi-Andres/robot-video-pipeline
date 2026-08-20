@@ -17,8 +17,11 @@ where latency does not matter.
 Latency discipline, and it is the whole point of this file:
   * ONE frame of state. Only the newest JPEG is kept; there is no queue to fall behind in.
   * A slow client SKIPS frames instead of delaying everyone. Nothing is ever buffered for it.
-  * Passthrough to stdout is byte-exact and never blocks on HTTP clients.
-  * No decode, no re-encode, no resize: the bytes the robot produced are the bytes served.
+  * Passthrough to stdout is byte-exact and never blocks on HTTP clients — the recording
+    branch always gets the original 1080p bytes, whatever the live branch is doing.
+  * By default nothing is decoded or re-encoded. Set MJPEG_WIDTH to trade a little Jetson
+    CPU for much smaller frames, which is what a constrained link to the robot needs: the
+    resize happens ONCE per frame, not once per viewer.
 
 Standard library only (Python 3.8 on the robot).
 """
@@ -34,7 +37,46 @@ BIND = os.environ.get("MJPEG_BIND", "0.0.0.0")
 # Cap for HTTP viewers only. Independent of the rate flowing to the NVR, so the live view can
 # be made cheaper without touching the recording.
 FPS = float(os.environ.get("MJPEG_FPS", "0")) or 0.0      # 0 = every frame
+# Downscale for HTTP viewers only. The videohub always answers 1080p (~200 KB a frame), and
+# MJPEG has no inter-frame compression, so at 3 fps that is ~600 KB/s — more than a
+# constrained link to the robot delivers, which then costs frames AND latency. Shrinking is
+# what actually helps here; dropping frames (MJPEG_FPS) does not make each one smaller.
+# The NVR branch is NEVER touched: it keeps the original bytes at full resolution.
+WIDTH = int(os.environ.get("MJPEG_WIDTH", "0") or 0)      # 0 = native, no re-encode
+QUALITY = int(os.environ.get("MJPEG_QUALITY", "75") or 75)
 BOUNDARY = "frame"
+
+_cv2 = None
+if WIDTH > 0:
+    try:
+        import cv2 as _cv2  # noqa: N813
+        import numpy as np
+    except ImportError:
+        _cv2 = None
+
+
+def _shrink(jpeg):
+    """Decode, resize, re-encode — once per frame, not once per client.
+
+    Returns the original bytes on any failure: a viewer seeing a big frame is much better
+    than a viewer seeing nothing, and this must never be able to break the stream.
+    """
+    if not _cv2 or WIDTH <= 0:
+        return jpeg
+    try:
+        img = _cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), _cv2.IMREAD_COLOR)
+        if img is None:
+            return jpeg
+        h, w = img.shape[:2]
+        if w <= WIDTH:
+            return jpeg
+        small = _cv2.resize(img, (WIDTH, int(h * WIDTH / w)),
+                            interpolation=_cv2.INTER_AREA)
+        ok, buf = _cv2.imencode(".jpg", small,
+                                [int(_cv2.IMWRITE_JPEG_QUALITY), QUALITY])
+        return buf.tobytes() if ok else jpeg
+    except Exception:
+        return jpeg
 
 
 def log(msg):
@@ -87,8 +129,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._snapshot()
         if path == "/health":
             body = (
-                b'{"ok":true,"clients":%d,"fps_cap":%s}'
-                % (LATEST.clients, str(FPS or "none").encode())
+                b'{"ok":true,"clients":%d,"fps_cap":%s,"width":%d,"quality":%d}'
+                % (LATEST.clients, str(FPS or "none").encode(), WIDTH, QUALITY)
             )
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -176,7 +218,7 @@ def pump():
                 if start > 0:
                     buf = buf[start:]
                 break
-            LATEST.put(buf[start:end + 2])
+            LATEST.put(_shrink(buf[start:end + 2]))
             buf = buf[end + 2:]
             frames += 1
             if frames % 300 == 0:
@@ -188,7 +230,11 @@ def main():
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log(f"serving http://{BIND}:{PORT}/stream  (fps cap: {FPS or 'none'})")
+    size = f"{WIDTH}px wide" if WIDTH > 0 else "native"
+    if WIDTH > 0 and _cv2 is None:
+        log("MJPEG_WIDTH is set but cv2 is missing — serving frames at native size")
+        size = "native (cv2 missing)"
+    log(f"serving http://{BIND}:{PORT}/stream  (fps cap: {FPS or 'none'}, {size})")
     try:
         pump()
     except KeyboardInterrupt:
