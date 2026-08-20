@@ -3,7 +3,16 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-SDK="${UNITREE_SDK2_DIR:-$HOME/Desktop/unitree_sdk2}"
+SDK="${UNITREE_SDK2_DIR:-}"
+if [ -z "$SDK" ]; then
+  # Look in both usual places: the robot clones it to ~/unitree_sdk2, a dev box keeps it
+  # on the Desktop. Without this the script fails on one of the two unless the caller
+  # remembers UNITREE_SDK2_DIR.
+  for c in "$HOME/unitree_sdk2" "$HOME/Desktop/unitree_sdk2"; do
+    [ -d "$c" ] && SDK="$c" && break
+  done
+  SDK="${SDK:-$HOME/unitree_sdk2}"
+fi
 ARCH="$(uname -m)"   # x86_64 or aarch64
 
 if [ ! -f "$SDK/lib/$ARCH/libunitree_sdk2.a" ]; then
