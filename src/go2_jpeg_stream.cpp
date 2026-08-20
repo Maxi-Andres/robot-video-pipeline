@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <csignal>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 #include <ctime>
@@ -29,6 +30,15 @@
 using namespace unitree::robot;
 
 static void nsleep(long ns) { timespec t{0, ns}; nanosleep(&t, nullptr); }
+
+// Monotonic nanoseconds. Used to pace the loop from the START of a cycle rather than
+// sleeping a fixed gap after it, which would add the sleep on top of however long the
+// robot took to answer.
+static long now_ns() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long)t.tv_sec * 1000000000L + t.tv_nsec;
+}
 
 int main(int argc, char** argv) {
     signal(SIGPIPE, SIG_IGN);  // ffmpeg gone -> stop cleanly, don't crash
@@ -53,6 +63,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> img, prev;
     long sent = 0, empty = 0;
     while (true) {
+        const long cycle_start = now_ns();
         img.clear();
         int r = vc.GetImageSample(img);
         if (r != 0 || img.size() < 4 || img[0] != 0xFF || img[1] != 0xD8) {
@@ -81,7 +92,7 @@ int main(int argc, char** argv) {
         // to answer, so "max 15 fps" against a ~270 ms request became ~3 fps — a 25% loss
         // for a cap that was never being approached.
         if (min_gap_ns) {
-            const long elapsed_ns = ns_since(cycle_start);
+            const long elapsed_ns = now_ns() - cycle_start;
             if (elapsed_ns < min_gap_ns) nsleep(min_gap_ns - elapsed_ns);
         }
     }
