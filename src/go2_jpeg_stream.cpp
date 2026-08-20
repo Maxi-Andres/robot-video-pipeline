@@ -76,7 +76,14 @@ int main(int argc, char** argv) {
         fflush(stdout);
         prev = img;
         if (++sent % 100 == 0) fprintf(stderr, "[go2_jpeg_stream] %ld frames\n", sent);
-        if (min_gap_ns) nsleep(min_gap_ns);
+        // Sleep only the REMAINDER of the frame interval, measured from the start of this
+        // cycle. Sleeping min_gap_ns outright added it on top of however long the robot took
+        // to answer, so "max 15 fps" against a ~270 ms request became ~3 fps — a 25% loss
+        // for a cap that was never being approached.
+        if (min_gap_ns) {
+            const long elapsed_ns = ns_since(cycle_start);
+            if (elapsed_ns < min_gap_ns) nsleep(min_gap_ns - elapsed_ns);
+        }
     }
     return 0;
 }

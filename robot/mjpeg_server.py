@@ -111,7 +111,22 @@ class Latest:
             return self._jpeg, self._seq
 
 
+# Two slots on purpose. pump() publishes to RAW and returns to reading immediately; a
+# worker thread does the expensive decode/resize/encode and publishes to LATEST. Doing the
+# resize inline in pump() throttled the CAPTURE itself — measured 3.2 fps dropping to 2.3 —
+# because every cycle waited for a 1080p decode before reading the next frame.
+RAW = Latest()
 LATEST = Latest()
+
+
+def resizer():
+    """Shrink the newest frame, forever. Skipping intermediate frames is correct: a viewer
+    wants the latest picture, not a backlog of stale ones."""
+    seq = -1
+    while True:
+        jpeg, seq = RAW.get_newer_than(seq, timeout=5.0)
+        if jpeg is not None:
+            LATEST.put(_shrink(jpeg))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -184,6 +199,9 @@ class Handler(BaseHTTPRequestHandler):
             LATEST.clients -= 1
 
 
+PUBLISH = None      # set in main(): RAW.put when resizing, LATEST.put when not
+
+
 def pump():
     """stdin -> stdout passthrough, publishing each JPEG as it goes by.
 
@@ -218,7 +236,7 @@ def pump():
                 if start > 0:
                     buf = buf[start:]
                 break
-            LATEST.put(_shrink(buf[start:end + 2]))
+            PUBLISH(buf[start:end + 2])
             buf = buf[end + 2:]
             frames += 1
             if frames % 300 == 0:
@@ -227,6 +245,15 @@ def pump():
 
 
 def main():
+    global PUBLISH
+    if WIDTH > 0 and _cv2 is not None:
+        # Resizing: hand frames to the worker so the capture loop never waits for it.
+        PUBLISH = RAW.put
+        threading.Thread(target=resizer, name="resizer", daemon=True).start()
+    else:
+        # Nothing to do per frame: publish straight to the served slot.
+        PUBLISH = LATEST.put
+
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
     srv.daemon_threads = True
     threading.Thread(target=srv.serve_forever, daemon=True).start()
