@@ -211,18 +211,30 @@ class Handler(BaseHTTPRequestHandler):
 
 PUBLISH = None      # set in main(): RAW.put when resizing, LATEST.put when not
 
-# Whole frames waiting to go downstream (the NVR). Bounded on purpose: the point is to drop
-# rather than to wait. Small, because a deep queue would only add latency to the recording
-# without ever helping — the uplink is the limit, not a temporary hiccup.
+# The NVR branch gets a DELIBERATE, REGULAR rate — not "whatever is left over".
+#
+# Dropping the oldest frame whenever the queue filled did keep the capture free, but it fed
+# the H.264 encoder an irregular 27% of frames: with fdsrc do-timestamp=true the timestamps
+# then jump around, and the FLV/RTMP stream that comes out is one Frigate cannot even start
+# on ("no frames have been received"). A DECODER tolerates dropped frames; an ENCODER needs a
+# cadence. So pick frames on a fixed interval instead, and keep the bounded queue only as a
+# safety net for a genuine stall.
+NVR_FPS = float(os.environ.get("NVR_FPS", "5"))
 NVR_MAX = int(os.environ.get("NVR_QUEUE", "8"))
+_nvr_last = 0.0
 _nvr = collections.deque()
 _nvr_cv = threading.Condition()
 _nvr_dropped = 0
 
 
 def nvr_offer(frame):
-    """Hand a whole frame to the writer thread. Never blocks; drops the oldest if full."""
-    global _nvr_dropped
+    """Offer a frame to the recording branch at a steady rate. Never blocks the caller."""
+    global _nvr_dropped, _nvr_last
+    if NVR_FPS > 0:
+        now = time.monotonic()
+        if now - _nvr_last < 1.0 / NVR_FPS:
+            return                      # not this one: keeps the cadence regular
+        _nvr_last = now
     with _nvr_cv:
         while len(_nvr) >= NVR_MAX:
             _nvr.popleft()
