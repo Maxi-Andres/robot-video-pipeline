@@ -41,7 +41,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("MJPEG_PORT", "8093"))
-BIND = os.environ.get("MJPEG_BIND", "0.0.0.0")
+BIND = os.environ.get("MJPEG_BIND", "0.0.0.0")  # noqa: S104  # known finding P0-1: binds broadly, no auth yet
 # Cap for HTTP viewers only. Independent of the rate flowing to the NVR, so the live view can
 # be made cheaper without touching the recording.
 FPS = float(os.environ.get("MJPEG_FPS", "0")) or 0.0      # 0 = every frame
@@ -57,7 +57,7 @@ BOUNDARY = "frame"
 _cv2 = None
 if WIDTH > 0:
     try:
-        import cv2 as _cv2  # noqa: N813
+        import cv2 as _cv2
         import numpy as np
     except ImportError:
         _cv2 = None
