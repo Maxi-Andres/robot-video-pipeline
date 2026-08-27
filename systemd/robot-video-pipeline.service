@@ -1,11 +1,11 @@
 [Unit]
-Description=Robot NVR pipeline (Go2 camera -> RTSP for Frigate)
+Description=Robot video pipeline (Go2 camera -> RTSP -> Frigate + live view)
 # run.sh handles its own retries, so no hard ordering deps are needed.
 
 [Service]
 Type=simple
-WorkingDirectory=%h/Desktop/robot-nvr-bridge
-ExecStart=%h/Desktop/robot-nvr-bridge/run.sh
+WorkingDirectory=%h/Desktop/robot-ecosystem/robot-video-pipeline
+ExecStart=%h/Desktop/robot-ecosystem/robot-video-pipeline/run.sh
 Restart=always
 RestartSec=3
 KillMode=mixed

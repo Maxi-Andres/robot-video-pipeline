@@ -1,4 +1,4 @@
-# robot-nvr-bridge
+# robot-video-pipeline
 
 Puente **independiente** que toma el video de la cámara del **robot Unitree Go2** y lo
 publica para que se pueda **ver en vivo y grabar en un NVR**. No toca ni depende de
@@ -70,7 +70,7 @@ apagado**, y podés enchufar otro NVR distinto sin cambiar nada de la captura.
 
 ### Requisito previo (una sola vez)
 ```bash
-cd ~/Desktop/robot-nvr-bridge
+cd ~/Desktop/robot-ecosystem/robot-video-pipeline
 ./setup.sh          # descarga mediamtx + ffmpeg (no se versionan en git)
 ./build.sh          # compila go2_jpeg_stream contra el SDK (necesita g++)
 ```
@@ -80,7 +80,7 @@ cd ~/Desktop/robot-nvr-bridge
 ./start-all.sh      # levanta el pipeline (como servicio) y el NVR Frigate
 ```
 La primera vez, `start-all.sh` instala el pipeline como **servicio systemd de usuario**
-(`robot-nvr.service`) con `Restart=always`, así queda **siempre prendido**: se
+(`robot-video-pipeline.service`) con `Restart=always`, así queda **siempre prendido**: se
 reinicia solo si falla y **se recupera solo cuando el robot se cae y vuelve** (no hay
 que relanzar nada a mano). Frigate ya se reinicia solo vía Docker (`restart:
 unless-stopped`).
@@ -94,8 +94,8 @@ sudo loginctl enable-linger $USER
 
 ### Ver / diagnosticar el servicio
 ```bash
-systemctl --user status robot-nvr.service       # estado
-journalctl --user -u robot-nvr.service -f        # logs en vivo
+systemctl --user status robot-video-pipeline.service       # estado
+journalctl --user -u robot-video-pipeline.service -f        # logs en vivo
 ```
 
 ### Ver la cámara
@@ -113,7 +113,6 @@ journalctl --user -u robot-nvr.service -f        # logs en vivo
 
 ### Ver logs / diagnosticar
 ```bash
-tail -f /tmp/robot-nvr-run.log         # el pipeline robot→RTSP
 cd frigate && docker compose logs -f   # el NVR
 ```
 
@@ -181,7 +180,7 @@ Para que ocupe **mucho menos disco**, cambiá `mode: all` por `mode: motion`, o 
 ## 7. Estructura del proyecto
 
 ```
-robot-nvr-bridge/
+robot-video-pipeline/
 ├── src/
 │   ├── go2_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
 │   └── go2_h264_stream.cpp   ← intento de H.264 nativo (NO funciona en este robot, ver §8)
@@ -189,7 +188,7 @@ robot-nvr-bridge/
 ├── build.sh                  ← compila los programas C++
 ├── run.sh                    ← supervisor: mediamtx + captura + ffmpeg (auto-reinicio)
 ├── install-service.sh        ← instala el pipeline como servicio systemd (siempre prendido)
-├── systemd/robot-nvr.service ← definición del servicio
+├── systemd/robot-video-pipeline.service ← definición del servicio
 ├── start-all.sh / stop-all.sh← prende / apaga TODO (servicio + NVR)
 ├── mediamtx  + mediamtx.yml  ← servidor de streaming + su config
 ├── mediamtx.stock.yml        ← config completa de referencia de mediamtx

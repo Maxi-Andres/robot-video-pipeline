@@ -13,8 +13,8 @@ if ! ping -c1 -W2 "$ROBOT_IP" >/dev/null 2>&1; then
 fi
 
 # 1. Pipeline as a supervised systemd user service (auto-restart / self-heal).
-if systemctl --user cat robot-nvr.service >/dev/null 2>&1; then
-  systemctl --user start robot-nvr.service
+if systemctl --user cat robot-video-pipeline.service >/dev/null 2>&1; then
+  systemctl --user start robot-video-pipeline.service
 else
   echo "[start] first run — installing the systemd service"
   ./install-service.sh
