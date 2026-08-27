@@ -1,4 +1,4 @@
-# Arquitectura y flujo del robot-nvr-bridge
+# Arquitectura y flujo del robot-video-pipeline
 
 Documento completo de **cómo funciona todo**: de dónde sale el video, por dónde
 pasa, dónde se procesa, dónde se guarda, qué tecnología usa cada parte y por qué.
@@ -132,8 +132,8 @@ frigate/media/
 
 ## 6. Siempre prendido (el servicio systemd)
 
-El pipeline corre como **servicio systemd de usuario** `robot-nvr.service`
-(`systemd/robot-nvr.service`, se instala con `install-service.sh`):
+El pipeline corre como **servicio systemd de usuario** `robot-video-pipeline.service`
+(`systemd/robot-video-pipeline.service`, se instala con `install-service.sh`):
 
 - `Restart=always` → si algo falla, systemd lo revive.
 - `run.sh` es un **supervisor**: mantiene `mediamtx` fijo y **reinicia sola** la cadena
@@ -147,8 +147,8 @@ Gestión:
 ./start-all.sh     # prende todo (servicio + Frigate)
 ./stop-all.sh      # apaga todo
 ./status.sh        # estado / health (uptime, procesos, stream, robot, grabaciones)
-systemctl --user status robot-nvr.service
-journalctl --user -u robot-nvr.service -f
+systemctl --user status robot-video-pipeline.service
+journalctl --user -u robot-video-pipeline.service -f
 ```
 
 ---
@@ -208,14 +208,14 @@ Cómo ver el video:
 ## 11. Estructura del proyecto
 
 ```
-robot-nvr-bridge/
+robot-video-pipeline/
 ├── src/go2_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
 ├── src/go2_h264_stream.cpp   ← intento de H.264 nativo (no funciona en este robot)
 ├── setup.sh                  ← descarga mediamtx + ffmpeg (no versionados en git)
 ├── build.sh                  ← compila los programas C++
 ├── run.sh                    ← supervisor: mediamtx + captura + ffmpeg (auto-reinicio)
 ├── install-service.sh        ← instala el servicio systemd (siempre prendido)
-├── systemd/robot-nvr.service ← definición del servicio
+├── systemd/robot-video-pipeline.service ← definición del servicio
 ├── start-all.sh / stop-all.sh / status.sh
 ├── mediamtx + mediamtx.yml   ← servidor de streaming + su config
 ├── bin/ffmpeg  bin/ffprobe   ← binarios estáticos

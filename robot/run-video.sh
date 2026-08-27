@@ -3,7 +3,7 @@
 #
 # Runs ON THE ROBOT (its high-level Jetson). This is the half of the pipeline that must be
 # L2-adjacent to the robot's DDS — proven, not assumed: from another subnet the robot pings
-# fine (1.3 ms) but only 2 of 122 DDS topics are visible. See SplunkCode/RED-Y-DDS.md.
+# fine (1.3 ms) but only 2 of 122 DDS topics are visible. See robot-splunk-docs/RED-Y-DDS.md.
 #
 #   go2_jpeg_stream (DDS) -> mjpeg_server -> nvjpegdec -> nvv4l2h264enc -> flvmux -> rtmpsink
 #                                  |

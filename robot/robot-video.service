@@ -11,7 +11,7 @@ StartLimitIntervalSec=120
 
 [Service]
 User=unitree
-WorkingDirectory=/home/unitree/robot-nvr-bridge
+WorkingDirectory=/home/unitree/robot-video-pipeline
 # Defaults first, then the config file — systemd applies these IN ORDER and the last one
 # wins, so EnvironmentFile MUST come after the Environment lines or the file would be
 # silently ignored for any key also listed here.
@@ -22,8 +22,8 @@ Environment=STREAM=robot
 Environment=BITRATE=2000000
 # PUBLISH_HOST has no default on purpose: run-video.sh refuses to start without it, which
 # is a clear error instead of silently publishing nowhere. Set it in video.env.
-EnvironmentFile=-/home/unitree/robot-nvr-bridge/robot/video.env
-ExecStart=/home/unitree/robot-nvr-bridge/robot/run-video.sh
+EnvironmentFile=-/home/unitree/robot-video-pipeline/robot/video.env
+ExecStart=/home/unitree/robot-video-pipeline/robot/run-video.sh
 Restart=always
 RestartSec=5
 # Video encode is hardware-accelerated, so this stays cheap — but cap it anyway: nothing
