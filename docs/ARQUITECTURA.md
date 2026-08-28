@@ -10,8 +10,18 @@ pasa, dónde se procesa, dónde se guarda, qué tecnología usa cada parte y por
 El robot Unitree **no es una cámara IP** (no tenés una URL de video para abrir). El
 video sale por el bus interno de Unitree (**DDS**). Este proyecto **lee ese video, lo
 convierte a un stream estándar (RTSP/H.264) y se lo entrega a un NVR (Frigate)** que lo
-muestra en vivo y lo graba. Todo corre en la PC (`192.168.123.99`), aparte del stack
-AI-VL — no lo toca.
+muestra en vivo y lo graba. Corre aparte del stack AI-VL — no lo toca.
+
+> ⚠️ **Corregido el 2026-08-28.** Este documento decía *"todo corre en la PC
+> (`192.168.123.99`)"*. Las dos mitades son falsas hoy:
+>
+> - Esta PC es **`192.168.20.99`** (se mudó a la VLAN 20, la de servidores).
+> - La captura **ya no corre acá**: se mudó al Jetson del robot, con encoder por hardware,
+>   porque el DDS no cruza de subred y el robot tiene que poder estar en cualquier red.
+>   Ver `robot/run-video.sh` y `robot-splunk-docs/ARQUITECTURA-REMOTA.md` §4.2.
+>
+> El flujo que describe §2 sigue siendo exacto **como cadena**; lo que cambió es **dónde
+> corre cada eslabón**. Estado y pendientes: `~/Desktop/.claude/ROADMAP.md` §5.2.
 
 ---
 
