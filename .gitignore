@@ -17,6 +17,14 @@
 /frigate/config/*
 !/frigate/config/config.yml
 
+# --- Python bytecode and test caches (the repo had no suite until 2026-08-28) ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+
 # --- misc ---
 *.log
 robot/video.env
