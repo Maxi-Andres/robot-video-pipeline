@@ -204,3 +204,14 @@ def test_the_stamp_round_trips_and_is_absent_from_an_unstamped_frame():
     assert mjpeg_server.read_stamp(SOI + b"x" + EOI) is None
     assert mjpeg_server.read_stamp(b"") is None
     assert mjpeg_server.read_stamp(SOI + b"\xff\xfe\x00\x04zz" + EOI) is None
+
+
+def test_health_is_valid_json_with_the_fps_cap_off():
+    """The defect: /health emitted a bare `none` for the cap, which is not JSON — and it
+    did so in the DEFAULT configuration (MJPEG_FPS=0), so every reader had to special-case
+    the healthy case. Caught while the drive-latency probe failed to parse it."""
+    import json
+    for cap, expected in ((0.0, None), (5.0, 5.0)):
+        body = (
+            b'{"fps_cap":%s}' % ((b"%g" % cap) if cap > 0 else b"null"))
+        assert json.loads(body)["fps_cap"] == expected
