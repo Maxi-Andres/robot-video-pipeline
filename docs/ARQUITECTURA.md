@@ -1,4 +1,4 @@
-# Arquitectura y flujo del robot-nvr-bridge
+# Arquitectura y flujo del robot-video-pipeline
 
 Documento completo de **cómo funciona todo**: de dónde sale el video, por dónde
 pasa, dónde se procesa, dónde se guarda, qué tecnología usa cada parte y por qué.
@@ -10,8 +10,18 @@ pasa, dónde se procesa, dónde se guarda, qué tecnología usa cada parte y por
 El robot Unitree **no es una cámara IP** (no tenés una URL de video para abrir). El
 video sale por el bus interno de Unitree (**DDS**). Este proyecto **lee ese video, lo
 convierte a un stream estándar (RTSP/H.264) y se lo entrega a un NVR (Frigate)** que lo
-muestra en vivo y lo graba. Todo corre en la PC (`192.168.123.99`), aparte del stack
-AI-VL — no lo toca.
+muestra en vivo y lo graba. Corre aparte del stack AI-VL — no lo toca.
+
+> ⚠️ **Corregido el 2026-08-28.** Este documento decía *"todo corre en la PC
+> (`192.168.123.99`)"*. Las dos mitades son falsas hoy:
+>
+> - Esta PC es **`192.168.20.99`** (se mudó a la VLAN 20, la de servidores).
+> - La captura **ya no corre acá**: se mudó al Jetson del robot, con encoder por hardware,
+>   porque el DDS no cruza de subred y el robot tiene que poder estar en cualquier red.
+>   Ver `robot/run-video.sh` y `robot-splunk-docs/ARQUITECTURA-REMOTA.md` §4.2.
+>
+> El flujo que describe §2 sigue siendo exacto **como cadena**; lo que cambió es **dónde
+> corre cada eslabón**. Estado y pendientes: `~/Desktop/.claude/ROADMAP.md` §5.2.
 
 ---
 
@@ -132,8 +142,8 @@ frigate/media/
 
 ## 6. Siempre prendido (el servicio systemd)
 
-El pipeline corre como **servicio systemd de usuario** `robot-nvr.service`
-(`systemd/robot-nvr.service`, se instala con `install-service.sh`):
+El pipeline corre como **servicio systemd de usuario** `robot-video-pipeline.service`
+(`systemd/robot-video-pipeline.service`, se instala con `install-service.sh`):
 
 - `Restart=always` → si algo falla, systemd lo revive.
 - `run.sh` es un **supervisor**: mantiene `mediamtx` fijo y **reinicia sola** la cadena
@@ -147,8 +157,8 @@ Gestión:
 ./start-all.sh     # prende todo (servicio + Frigate)
 ./stop-all.sh      # apaga todo
 ./status.sh        # estado / health (uptime, procesos, stream, robot, grabaciones)
-systemctl --user status robot-nvr.service
-journalctl --user -u robot-nvr.service -f
+systemctl --user status robot-video-pipeline.service
+journalctl --user -u robot-video-pipeline.service -f
 ```
 
 ---
@@ -208,14 +218,14 @@ Cómo ver el video:
 ## 11. Estructura del proyecto
 
 ```
-robot-nvr-bridge/
+robot-video-pipeline/
 ├── src/go2_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
 ├── src/go2_h264_stream.cpp   ← intento de H.264 nativo (no funciona en este robot)
 ├── setup.sh                  ← descarga mediamtx + ffmpeg (no versionados en git)
 ├── build.sh                  ← compila los programas C++
 ├── run.sh                    ← supervisor: mediamtx + captura + ffmpeg (auto-reinicio)
 ├── install-service.sh        ← instala el servicio systemd (siempre prendido)
-├── systemd/robot-nvr.service ← definición del servicio
+├── systemd/robot-video-pipeline.service ← definición del servicio
 ├── start-all.sh / stop-all.sh / status.sh
 ├── mediamtx + mediamtx.yml   ← servidor de streaming + su config
 ├── bin/ffmpeg  bin/ffprobe   ← binarios estáticos

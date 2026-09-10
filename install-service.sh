@@ -8,11 +8,11 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 
 DEST="$HOME/.config/systemd/user"
 mkdir -p "$DEST"
-cp systemd/robot-nvr.service "$DEST/robot-nvr.service"
+cp systemd/robot-video-pipeline.service "$DEST/robot-video-pipeline.service"
 
 systemctl --user daemon-reload
-systemctl --user enable --now robot-nvr.service
-echo "[install] robot-nvr.service enabled and started."
+systemctl --user enable --now robot-video-pipeline.service
+echo "[install] robot-video-pipeline.service enabled and started."
 echo
 
 # For the service to also start at BOOT without anyone logging in, user lingering
@@ -22,5 +22,5 @@ if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; t
   echo "    sudo loginctl enable-linger $USER"
   echo
 fi
-echo "Status:  systemctl --user status robot-nvr.service"
-echo "Logs:    journalctl --user -u robot-nvr.service -f"
+echo "Status:  systemctl --user status robot-video-pipeline.service"
+echo "Logs:    journalctl --user -u robot-video-pipeline.service -f"
