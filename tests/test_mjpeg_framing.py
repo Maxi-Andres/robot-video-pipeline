@@ -55,7 +55,10 @@ class _FakeStdin:
 def _run_pump(monkeypatch, chunks):
     """Drive `pump()` over `chunks` and return the frames it published, in order."""
     published = []
-    monkeypatch.setattr(mjpeg_server, "PUBLISH", published.append)
+    # PUBLISH takes (frame, t_in): pump() always passes the capture instant, which is 0.0
+    # unless STAMP is on. The framing tests only care about the bytes.
+    monkeypatch.setattr(mjpeg_server, "PUBLISH",
+                        lambda frame, _t_in=0.0: published.append(frame))
     monkeypatch.setattr(mjpeg_server, "nvr_offer", lambda _frame: None)
     monkeypatch.setattr(mjpeg_server, "log", lambda *_a, **_k: None)
     monkeypatch.setattr(sys, "stdin", _FakeStdin(chunks))
@@ -168,3 +171,36 @@ def test_an_soi_with_no_eoi_does_not_grow_the_buffer_without_bound(monkeypatch):
         f"the scanner held {peak / 1024 / 1024:.1f} MB of a 5 MB unterminated frame; it "
         "needs a ceiling that abandons the frame and resyncs on the next SOI"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The latency stamp
+#
+# The measurement is only trustworthy if carrying it cannot change what is measured or
+# corrupt what is carried. These name the two ways that could go wrong.
+# --------------------------------------------------------------------------- #
+def test_a_stamped_frame_is_still_a_valid_jpeg_envelope():
+    """The defect: splicing the COM segment in the wrong place, so a decoder that is
+    strict about SOI-first (or about the segment length) refuses the frame. A stamp that
+    breaks the picture is worse than no stamp."""
+    raw = SOI + b"payload" + EOI
+    out = mjpeg_server.stamp(raw, 1.0, 2.0)
+    assert out.startswith(SOI), "SOI must stay first"
+    assert out.endswith(EOI), "EOI must stay last"
+    assert out[2:4] == b"\xff\xfe", "the COM marker goes immediately after SOI"
+    declared = (out[4] << 8) | out[5]
+    assert out[4 + declared:] == raw[2:], (
+        "the declared segment length must cover exactly the payload, so a decoder "
+        "resumes at the original first byte after SOI")
+    assert raw[2:] in out, "the original bytes must survive untouched"
+
+
+def test_the_stamp_round_trips_and_is_absent_from_an_unstamped_frame():
+    """The defect: read_stamp() drifting out of step with stamp(), which would silently
+    report a wrong latency instead of no latency. Also pins that an UNSTAMPED frame
+    reads as None rather than as garbage numbers."""
+    assert mjpeg_server.read_stamp(mjpeg_server.stamp(SOI + b"x" + EOI,
+                                                      1234.5, 1234.75)) == (1234.5, 1234.75)
+    assert mjpeg_server.read_stamp(SOI + b"x" + EOI) is None
+    assert mjpeg_server.read_stamp(b"") is None
+    assert mjpeg_server.read_stamp(SOI + b"\xff\xfe\x00\x04zz" + EOI) is None

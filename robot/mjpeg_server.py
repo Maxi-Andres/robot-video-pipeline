@@ -91,6 +91,61 @@ def log(msg):
     print(f"[mjpeg] {msg}", file=sys.stderr, flush=True)
 
 
+# --------------------------------------------------------------------------- #
+# Latency instrumentation — OFF by default, and free when off.
+#
+# WHY: the live view is what you steer by, and it was measured at ~700-1000 ms
+# glass-to-glass while the whole downstream chain (network + camera_bridge + backend +
+# hub) accounts for only 4.8 ms p50 (measured 2026-09-10 by hash-correlating the same
+# frame at :8093 and at the browser socket). So essentially ALL of it is upstream of
+# here, and the only way to split "the robot's camera service" from "this process" is to
+# carry a capture time INSIDE the frame.
+#
+# HOW: a JPEG COM segment spliced in right after SOI. Two bytes of marker, two of length,
+# then the payload — no decode, no re-encode, one bytes concat per frame. Every decoder
+# ignores COM, so the frame stays valid all the way to the browser and the passthrough
+# fast paths downstream (camera_bridge quality=0/native, backend hub fan-out) forward it
+# untouched. That is what makes the measurement honest: the thing being measured is not
+# perturbed by measuring it.
+#
+# Set STAMP=1 to enable. Read it downstream with read_stamp().
+# --------------------------------------------------------------------------- #
+STAMP = os.environ.get("STAMP", "0") == "1"
+_SOI = b"\xff\xd8"
+_COM = b"\xff\xfe"
+_TAG = b"AVL1 "
+
+
+def stamp(jpeg, t_in, t_out):
+    """Splice a COM segment carrying the two robot-side timestamps, as ASCII seconds.
+
+    t_in  — when pump() pulled the frame off go2_jpeg_stream's stdout
+    t_out — when it was published to viewers, i.e. after any resize
+
+    Their difference is this process's own cost; the difference between t_out and a
+    downstream arrival time is everything after the robot.
+    """
+    payload = _TAG + b"%.6f %.6f" % (t_in, t_out)
+    seg = _COM + bytes(((len(payload) + 2) >> 8, (len(payload) + 2) & 0xFF)) + payload
+    return jpeg[:2] + seg + jpeg[2:]
+
+
+def read_stamp(jpeg):
+    """(t_in, t_out) from a stamped frame, or None. Mirror of stamp(); used by the
+    measuring client, which lives off-robot — keep the two in step."""
+    if not jpeg.startswith(_SOI) or jpeg[2:4] != _COM:
+        return None
+    n = (jpeg[4] << 8) | jpeg[5]
+    body = jpeg[6:4 + n]
+    if not body.startswith(_TAG):
+        return None
+    try:
+        a, b = body[len(_TAG):].split()
+        return float(a), float(b)
+    except (ValueError, IndexError):
+        return None
+
+
 class Latest:
     """The newest frame, and a way to wait for one newer than the one you last saw.
 
@@ -101,12 +156,16 @@ class Latest:
     def __init__(self):
         self._cv = threading.Condition()
         self._jpeg = None
+        self._t_in = 0.0
         self._seq = 0
         self.clients = 0
 
-    def put(self, jpeg):
+    def put(self, jpeg, t_in=0.0):
+        # t_in rides ALONGSIDE the bytes rather than inside them so the resize path does
+        # not have to splice a stamp, throw it away in the re-encode, and splice it again.
         with self._cv:
             self._jpeg = jpeg
+            self._t_in = t_in
             self._seq += 1
             self._cv.notify_all()
 
@@ -115,8 +174,8 @@ class Latest:
             if self._seq == seq:
                 self._cv.wait(timeout)
             if self._seq == seq:
-                return None, seq
-            return self._jpeg, self._seq
+                return None, seq, 0.0
+            return self._jpeg, self._seq, self._t_in
 
 
 # Two slots on purpose. pump() publishes to RAW and returns to reading immediately; a
@@ -132,9 +191,13 @@ def resizer():
     wants the latest picture, not a backlog of stale ones."""
     seq = -1
     while True:
-        jpeg, seq = RAW.get_newer_than(seq, timeout=5.0)
+        jpeg, seq, t_in = RAW.get_newer_than(seq, timeout=5.0)
         if jpeg is not None:
-            LATEST.put(_shrink(jpeg))
+            small = _shrink(jpeg)
+            # Stamp AFTER the resize: _shrink re-encodes, so anything spliced in before
+            # would be dropped. t_out is therefore the true "ready for viewers" instant,
+            # and t_out - t_in is exactly what the resize costs.
+            LATEST.put(stamp(small, t_in, time.time()) if STAMP else small)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -151,11 +214,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/snapshot":
             return self._snapshot()
         if path == "/health":
+            # `now` is the robot's wall clock at the instant this answer was built. A
+            # caller that records its own clock before and after the request gets the
+            # offset between the two machines the way SNTP does — offset =
+            # now - (t_before + t_after) / 2 — accurate to about half the RTT. Without it
+            # the stamps in the frames cannot be compared against an off-robot clock at
+            # all, and the two machines are not NTP-locked to each other.
             body = (
                 b'{"ok":true,"clients":%d,"fps_cap":%s,"width":%d,"quality":%d,'
-                b'"nvr_queue":%d,"nvr_dropped":%d}'
+                b'"nvr_queue":%d,"nvr_dropped":%d,"stamp":%s,"now":%.6f}'
                 % (LATEST.clients, str(FPS or "none").encode(), WIDTH, QUALITY,
-                   len(_nvr), _nvr_dropped)
+                   len(_nvr), _nvr_dropped, b"true" if STAMP else b"false", time.time())
             )
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -166,7 +235,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def _snapshot(self):
-        jpeg, _ = LATEST.get_newer_than(-1, timeout=3.0)
+        jpeg, _, _ = LATEST.get_newer_than(-1, timeout=3.0)
         if not jpeg:
             return self.send_error(503, "no frame yet")
         self.send_response(200)
@@ -190,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         last = 0.0
         try:
             while True:
-                jpeg, seq = LATEST.get_newer_than(seq, timeout=10.0)
+                jpeg, seq, _ = LATEST.get_newer_than(seq, timeout=10.0)
                 if jpeg is None:
                     continue                      # no new frame yet; keep the socket open
                 if min_gap:
@@ -298,8 +367,11 @@ def pump():
             frame = buf[start:end + 2]
             buf = buf[end + 2:]
             # Live first: it is the branch whose latency we care about.
-            PUBLISH(frame)
-            nvr_offer(frame)
+            # t_in is read here, the earliest instant this process can see the frame —
+            # go2_jpeg_stream's GetImageSample has already returned and the pipe is
+            # effectively free, so it doubles as "when the robot handed us the frame".
+            PUBLISH(frame, time.time() if STAMP else 0.0)
+            nvr_offer(frame)   # the NVR always gets the original, unstamped bytes
             frames += 1
             if frames % 300 == 0:
                 dt = time.monotonic() - t0
@@ -314,8 +386,9 @@ def main():
         PUBLISH = RAW.put
         threading.Thread(target=resizer, name="resizer", daemon=True).start()
     else:
-        # Nothing to do per frame: publish straight to the served slot.
-        PUBLISH = LATEST.put
+        # Nothing to do per frame: publish straight to the served slot. With STAMP on,
+        # t_out == t_in by construction — there is no work between the two.
+        PUBLISH = (lambda j, t: LATEST.put(stamp(j, t, t))) if STAMP else LATEST.put
 
     threading.Thread(target=nvr_writer, name="nvr-writer", daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
