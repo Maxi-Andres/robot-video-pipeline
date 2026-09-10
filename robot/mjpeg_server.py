@@ -33,6 +33,7 @@ Latency discipline, and it is the whole point of this file:
 Standard library only (Python 3.8 on the robot).
 """
 import collections
+import json
 import os
 import socket
 import sys
@@ -55,21 +56,42 @@ QUALITY = int(os.environ.get("MJPEG_QUALITY", "75") or 75)
 BOUNDARY = "frame"
 
 _cv2 = None
-if WIDTH > 0:
+np = None
+_cv2_tried = False
+
+
+def _load_cv2():
+    """Import cv2 on FIRST USE, not at import time.
+
+    WHY: this used to be `if WIDTH > 0: import cv2` at module scope, which quietly made the
+    resize un-switchable. WIDTH can now be changed at runtime (POST /config), and a process
+    that started at WIDTH=0 would have found `_cv2 is None` and gone on serving native
+    frames — the operator moves the control, the number changes, and nothing happens. The
+    import is cheap and happens at most once.
+    """
+    global _cv2, np, _cv2_tried
+    if _cv2_tried:
+        return _cv2
+    _cv2_tried = True
     try:
-        import cv2 as _cv2
-        import numpy as np
+        import cv2
+        import numpy
     except ImportError:
-        _cv2 = None
+        log("cv2 is not installed — frames stay at native size whatever MJPEG_WIDTH says")
+        return None
+    _cv2, np = cv2, numpy
+    return _cv2
 
 
 def _shrink(jpeg):
     """Decode, resize, re-encode — once per frame, not once per client.
 
+    Reads WIDTH/QUALITY at CALL time, not at import: both are runtime-tunable.
+
     Returns the original bytes on any failure: a viewer seeing a big frame is much better
     than a viewer seeing nothing, and this must never be able to break the stream.
     """
-    if not _cv2 or WIDTH <= 0:
+    if WIDTH <= 0 or not _load_cv2():
         return jpeg
     try:
         img = _cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), _cv2.IMREAD_COLOR)
@@ -144,6 +166,51 @@ def read_stamp(jpeg):
         return float(a), float(b)
     except (ValueError, IndexError):
         return None
+
+
+# --------------------------------------------------------------------------- #
+# Live-tunable parameters
+#
+# An ALLOWLIST with a range per key, not a generic setter. Same reasoning as the relay's
+# verb table: a generic "write any name to any value" is how a typo takes the video off the
+# air with no way back except SSH — which is the exact trip this endpoint exists to save.
+#
+# Ranges: fps 0 = uncapped; width 0 = native (no decode at all); quality only matters when
+# width > 0, since at native size the bytes are forwarded untouched.
+# --------------------------------------------------------------------------- #
+LIVE_PARAMS = {
+    "fps":     ("FPS", float, 0.0, 60.0),
+    "width":   ("WIDTH", int, 0, 1920),
+    "quality": ("QUALITY", int, 1, 100),
+}
+
+
+def live_params():
+    return {"fps": FPS, "width": WIDTH, "quality": QUALITY}
+
+
+def set_live_params(body):
+    """Apply a {fps,width,quality} subset. Returns what changed. Raises ValueError.
+
+    Validated fully BEFORE anything is applied, so a bad value in a two-key request cannot
+    leave the stream half-reconfigured.
+    """
+    unknown = set(body) - set(LIVE_PARAMS)
+    if unknown:
+        raise ValueError(f"unknown parameter(s): {sorted(unknown)}; "
+                         f"allowed: {sorted(LIVE_PARAMS)}")
+    staged = {}
+    for key, raw in body.items():
+        name, cast, lo, hi = LIVE_PARAMS[key]
+        try:
+            value = cast(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"'{key}' must be {cast.__name__}, got {raw!r}") from None
+        if not lo <= value <= hi:
+            raise ValueError(f"'{key}' must be between {lo} and {hi}, got {value}")
+        staged[name] = value
+    globals().update(staged)
+    return {k: globals()[LIVE_PARAMS[k][0]] for k in body}
 
 
 class Latest:
@@ -237,6 +304,40 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error(404)
 
+    def do_POST(self):
+        """POST /config {fps?, width?, quality?} — retune the live view without a restart.
+
+        LOCALHOST ONLY, and that is the security design, not a convenience. This port binds
+        0.0.0.0 with no authentication (known finding P0-1), so a WRITE route reachable from
+        the network would be a straight downgrade. The relay is the authenticated surface:
+        it validates the request against its allowlist and then calls this from 127.0.0.1.
+        Nothing else can reach it, so no second token has to exist.
+        """
+        if self.path.split("?")[0].rstrip("/") != "/config":
+            return self.send_error(404)
+        if self.client_address[0] not in ("127.0.0.1", "::1"):
+            log(f"rejected /config from {self.client_address[0]} (localhost only)")
+            return self._json(403, {"ok": False, "error": "localhost only"})
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return self._json(400, {"ok": False, "error": "bad json"})
+        try:
+            applied = set_live_params(body)
+        except ValueError as exc:
+            return self._json(400, {"ok": False, "error": str(exc)})
+        log(f"live config: {applied}")
+        return self._json(200, {"ok": True, **live_params()})
+
+    def _json(self, code, obj):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _snapshot(self):
         jpeg, _, _ = LATEST.get_newer_than(-1, timeout=3.0)
         if not jpeg:
@@ -258,13 +359,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         LATEST.clients += 1
         seq = -1
-        min_gap = (1.0 / FPS) if FPS > 0 else 0.0
         last = 0.0
         try:
             while True:
                 jpeg, seq, _ = LATEST.get_newer_than(seq, timeout=10.0)
                 if jpeg is None:
                     continue                      # no new frame yet; keep the socket open
+                # Re-read the cap EVERY frame. It used to be computed once when the client
+                # connected, which meant a live change reached nobody: the camera bridge
+                # holds one connection open for hours, so the operator would move the
+                # control and the stream it actually feeds would never notice.
+                min_gap = (1.0 / FPS) if FPS > 0 else 0.0
                 if min_gap:
                     now = time.monotonic()
                     if now - last < min_gap:
@@ -384,14 +489,14 @@ def pump():
 
 def main():
     global PUBLISH
-    if WIDTH > 0 and _cv2 is not None:
-        # Resizing: hand frames to the worker so the capture loop never waits for it.
-        PUBLISH = RAW.put
-        threading.Thread(target=resizer, name="resizer", daemon=True).start()
-    else:
-        # Nothing to do per frame: publish straight to the served slot. With STAMP on,
-        # t_out == t_in by construction — there is no work between the two.
-        PUBLISH = (lambda j, t: LATEST.put(stamp(j, t, t))) if STAMP else LATEST.put
+    # ALWAYS go through the worker, even when nothing is being resized.
+    #
+    # This used to branch on WIDTH at startup: with WIDTH=0 frames went straight to LATEST
+    # and no worker existed, so raising WIDTH at runtime resized nothing and the control
+    # looked broken. The worker decides per frame instead, which costs one condition-variable
+    # hand-off (microseconds, against a 41 ms transport) and makes the knob actually work.
+    PUBLISH = RAW.put
+    threading.Thread(target=resizer, name="resizer", daemon=True).start()
 
     threading.Thread(target=nvr_writer, name="nvr-writer", daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
