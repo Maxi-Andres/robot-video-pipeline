@@ -215,3 +215,62 @@ def test_health_is_valid_json_with_the_fps_cap_off():
         body = (
             b'{"fps_cap":%s}' % ((b"%g" % cap) if cap > 0 else b"null"))
         assert json.loads(body)["fps_cap"] == expected
+
+
+# --------------------------------------------------------------------------- #
+# The live-tunable parameters
+#
+# These exist so the operator can retune the drive view without SSH. The whole point is
+# that a bad value must be REFUSED, not applied — a stream tuned into uselessness on a
+# robot in the field can only be undone over SSH, which is the trip being avoided.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("body, expect", [
+    ({"fps": 0}, {"FPS": 0.0}),                    # 0 = uncapped, the default
+    ({"fps": 15}, {"FPS": 15.0}),
+    ({"fps": 60}, {"FPS": 60.0}),                  # at the ceiling
+    ({"width": 0}, {"WIDTH": 0}),                  # 0 = native, no decode
+    ({"width": 640}, {"WIDTH": 640}),
+    ({"width": 1920}, {"WIDTH": 1920}),            # at the ceiling
+    ({"quality": 1}, {"QUALITY": 1}),              # at the floor
+    ({"quality": 55}, {"QUALITY": 55}),
+    ({"fps": 5, "width": 640, "quality": 55},
+     {"FPS": 5.0, "WIDTH": 640, "QUALITY": 55}),   # several at once
+])
+def test_valid_live_params_are_applied(monkeypatch, body, expect):
+    for name in ("FPS", "WIDTH", "QUALITY"):
+        monkeypatch.setattr(mjpeg_server, name, getattr(mjpeg_server, name))
+    mjpeg_server.set_live_params(body)
+    for name, value in expect.items():
+        assert getattr(mjpeg_server, name) == value
+
+
+@pytest.mark.parametrize("body, why", [
+    ({"fps": -1}, "below the floor"),
+    ({"fps": 61}, "above the ceiling"),
+    ({"width": -1}, "negative width"),
+    ({"width": 4096}, "wider than the sensor"),
+    ({"quality": 0}, "quality 0 is not a JPEG quality"),
+    ({"quality": 101}, "above 100"),
+    ({"fps": "fast"}, "not a number"),
+    ({"bitrate": 100}, "not in the allowlist — needs a pipeline restart, not a live set"),
+    ({"NIC": "eth9"}, "an arbitrary env key must never reach the file"),
+])
+def test_bad_live_params_are_refused(monkeypatch, body, why):
+    for name in ("FPS", "WIDTH", "QUALITY"):
+        monkeypatch.setattr(mjpeg_server, name, getattr(mjpeg_server, name))
+    before = mjpeg_server.live_params()
+    with pytest.raises(ValueError):
+        mjpeg_server.set_live_params(body)
+    assert mjpeg_server.live_params() == before, f"refused but still applied ({why})"
+
+
+def test_one_bad_value_rejects_the_whole_request(monkeypatch):
+    """The defect: validating and applying key by key, so `{fps: 10, width: 9999}` leaves
+    the fps changed and the width not — a half-applied config the operator never asked
+    for, on the video they are steering by."""
+    for name in ("FPS", "WIDTH", "QUALITY"):
+        monkeypatch.setattr(mjpeg_server, name, getattr(mjpeg_server, name))
+    before = mjpeg_server.live_params()
+    with pytest.raises(ValueError):
+        mjpeg_server.set_live_params({"fps": 10, "width": 9999})
+    assert mjpeg_server.live_params() == before
