@@ -27,19 +27,19 @@ echo
 
 # --- 1. systemd service ---
 echo "SERVICIO (pipeline robot -> RTSP)"
-state=$(systemctl --user is-active robot-nvr.service 2>/dev/null)
+state=$(systemctl --user is-active robot-video-pipeline.service 2>/dev/null)
 if [ "$state" = active ]; then
-  ok "robot-nvr.service: $(g activo)"
-  since=$(systemctl --user show robot-nvr.service --value -p ActiveEnterTimestamp 2>/dev/null)
+  ok "robot-video-pipeline.service: $(g activo)"
+  since=$(systemctl --user show robot-video-pipeline.service --value -p ActiveEnterTimestamp 2>/dev/null)
   printf '       uptime : %s\n' "$(human_since "$since")"
   printf '       PID    : %s   reinicios: %s\n' \
-    "$(systemctl --user show robot-nvr.service --value -p MainPID)" \
-    "$(systemctl --user show robot-nvr.service --value -p NRestarts)"
-  systemctl --user is-enabled robot-nvr.service >/dev/null 2>&1 \
+    "$(systemctl --user show robot-video-pipeline.service --value -p MainPID)" \
+    "$(systemctl --user show robot-video-pipeline.service --value -p NRestarts)"
+  systemctl --user is-enabled robot-video-pipeline.service >/dev/null 2>&1 \
     && printf '       boot   : %s\n' "$(g 'habilitado (arranca al iniciar sesion)')" \
     || printf '       boot   : %s\n' "$(y 'no habilitado')"
 else
-  bad "robot-nvr.service: $(r "${state:-desconocido}")   (arranca con: ./start-all.sh)"
+  bad "robot-video-pipeline.service: $(r "${state:-desconocido}")   (arranca con: ./start-all.sh)"
 fi
 echo
 
