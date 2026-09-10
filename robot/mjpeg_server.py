@@ -221,9 +221,12 @@ class Handler(BaseHTTPRequestHandler):
             # the stamps in the frames cannot be compared against an off-robot clock at
             # all, and the two machines are not NTP-locked to each other.
             body = (
+                # `null`, not `none`: with no cap this used to emit a bare Python None,
+                # which is not JSON — so /health was unparseable in exactly the DEFAULT
+                # configuration (MJPEG_FPS=0), and every reader had to special-case it.
                 b'{"ok":true,"clients":%d,"fps_cap":%s,"width":%d,"quality":%d,'
                 b'"nvr_queue":%d,"nvr_dropped":%d,"stamp":%s,"now":%.6f}'
-                % (LATEST.clients, str(FPS or "none").encode(), WIDTH, QUALITY,
+                % (LATEST.clients, (b"%g" % FPS) if FPS > 0 else b"null", WIDTH, QUALITY,
                    len(_nvr), _nvr_dropped, b"true" if STAMP else b"false", time.time())
             )
             self.send_response(200)

@@ -94,7 +94,10 @@ def main():
             r = urllib.request.urlopen(f"{MJPEG}/stream", timeout=10)
             buf = b""
             while time.time() < stop:
-                c = r.read(2048)
+                # read1(), NOT read(): read(n) blocks for the full buffer and would add
+                # a whole frame period to every measurement — the very defect this probe
+                # found in the camera bridge (213 ms, measured).
+                c = r.read1(2048)
                 if not c:
                     break
                 buf += c
