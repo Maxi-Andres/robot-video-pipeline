@@ -1,0 +1,44 @@
+# Isolated twin of the production mediamtx.yml, on shifted ports.
+#
+# Why a second instance and not the live one: the production instance is the robot's RTMP
+# target and Frigate's RTSP source. Publishing a test pattern into it would land in the NVR
+# recordings and fight the robot for the `robot` path. Every latency-relevant setting here is
+# the stock default, exactly as in production — only the addresses differ — so the number
+# this instance yields transfers.
+logLevel: info
+
+rtsp: yes
+rtspAddress: :18554
+rtpAddress: :18000
+rtcpAddress: :18001
+rtspTransports: [tcp, udp]   # as in production; also keeps the multicast listeners out of the way
+
+hls: no
+
+webrtc: yes
+webrtcAddress: :18889
+webrtcLocalUDPAddress: :18189
+
+rtmp: yes
+rtmpAddress: :11935
+
+srt: no
+
+# On in the test twin only: the production config has `api: no`, which is exactly why there
+# is no programmatic way to see publishers and readers when diagnosing (noted as a risk in
+# the plan). Here it costs nothing and shows whether the publisher really attached.
+api: yes
+apiAddress: :19997
+
+metrics: no
+pprof: no
+playback: no
+
+paths:
+  lat:
+    source: publisher
+  # target for the robot-side encoder diagnostic, so it never publishes into production
+  diag:
+    source: publisher
+
+moq: no
