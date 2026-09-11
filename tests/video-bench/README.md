@@ -59,6 +59,13 @@ Two traps, both hit while building this:
 * **Do not time the stream by decoding mediamtx's RTSP output with ffmpeg.** It reports ~272 ms
   that are ffmpeg's own buffering, and it gives itself away by reading at 17.8 fps while
   catching up on a backlog instead of the true 15.
+* **Close other bench tabs.** Every open tab measures its own peer connection and posts to
+  the same `report.jsonl`; mixed sessions showed up as a *negative* bitrate. Each window now
+  carries a session id and `show.py` reports only the newest unless given `--all`.
+* **A hidden tab invents stalls.** Firefox throttles `requestVideoFrameCallback` in
+  background tabs, which produced a 2893 ms "gap" in a window where `getStats` reported
+  `freezeCount: 0`. Windows now report `hidden_ms`; when the two disagree, believe
+  `freezeCount` — it is computed in the decoder.
 
 ## 4. Isolating a pipeline stage from the robot and the link
 
