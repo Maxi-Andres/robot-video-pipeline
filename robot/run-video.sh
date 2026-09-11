@@ -165,10 +165,22 @@ trap cleanup EXIT INT TERM
 # keeps the same pipe on fd 0 across encoder restarts, so while gst is down mjpeg_server just
 # blocks on stdout — exactly what its nvr_writer is documented to be the only thing allowed
 # to do — and its bounded queue drops frames rather than growing latency.
+# Elapsed time from /proc/uptime, NOT from $SECONDS. MEASURED on the robot 2026-09-11: its
+# clock jumped backwards from September to January mid-run and the log printed
+# "encoder died after -1788887772s", which made every run look instantaneous and tripped the
+# give-up counter immediately. /proc/uptime is monotonic and survives that.
+uptime_s() { awk '{print int($1)}' /proc/uptime; }
+
+# Ends the capture -> tee -> encoder pipeline so the outer loop can rebuild it. Kills the
+# children of the MAIN shell ($$ is not rewritten in a sub-shell), which includes this
+# sub-shell itself — that is fine, we are on our way out either way. A blink of the live
+# view is the price, and it is only paid on the paths that already gave up.
+end_chain() { pkill -P $$ 2>/dev/null || true; }
+
 encode_and_publish() {
-  local fails=0 started rc
+  local fails=0 started rc elapsed
   while :; do
-    started=$SECONDS
+    started=$(uptime_s)
     # do-timestamp=true because the JPEGs arrive with no timestamps of their own and at an
     # irregular cadence. If the publish ever stalls, insert `videorate` after the decoder —
     # that is the GStreamer equivalent of the `-vsync cfr` fix the desktop pipeline needed.
@@ -187,23 +199,37 @@ encode_and_publish() {
       ! h264parse config-interval=-1 ! $SINK
     rc=$?
 
-    # Exit 0 is a clean EOS: the capture upstream closed, so there is nothing left to
-    # encode and the OUTER loop should rebuild the whole chain. Anything else is the
-    # encoder falling over on its own while frames are still coming.
-    [ "$rc" = 0 ] && { echo "[robot-video] encoder reached EOS (upstream gone)" >&2; return 0; }
+    # Exit 0 is a clean EOS: nothing left to encode, so the OUTER loop should rebuild the
+    # whole chain. Anything else is the encoder falling over while frames are still coming.
+    #
+    # end_chain, not a bare return: mjpeg_server survives a broken pipe on purpose, so a
+    # return alone leaves the shell waiting on a pipeline that will never finish and the
+    # branch stays dead. That is the original defect, and it bites at BOTH exits of this
+    # function — the give-up path and this one.
+    [ "$rc" = 0 ] && { echo "[robot-video] encoder reached EOS (upstream gone)" >&2; end_chain; return 0; }
+
+    elapsed=$(( $(uptime_s) - started ))
+    [ "$elapsed" -lt 0 ] && elapsed=0
 
     # A run that lasted a while is a one-off; only back-to-back failures mean the encoder
     # cannot start at all, in which case rebuilding the capture side is worth a try.
-    if [ $((SECONDS - started)) -ge 30 ]; then
+    if [ "$elapsed" -ge 30 ]; then
       fails=0
     else
       fails=$((fails + 1))
     fi
     if [ "$fails" -ge 5 ]; then
+      # Returning is NOT enough, and this is the same trap that made the original loop
+      # useless one level down: mjpeg_server swallows the EPIPE and stays alive, so the
+      # pipeline never ends and the outer `while` never gets to rebuild anything. MEASURED
+      # 2026-09-12: the branch died here and stayed dead, with "dropped to NVR" climbing.
+      # Kill the whole chain — including this sub-shell, which is also a child of $$ — so
+      # the pipeline really ends. A blink of the live view is the price of last resort.
       echo "[robot-video] encoder failed $fails times in a row (rc=$rc); rebuilding capture" >&2
+      end_chain
       return 1
     fi
-    echo "[robot-video] encoder died (rc=$rc) after $((SECONDS - started))s; restarting it in 2s" >&2
+    echo "[robot-video] encoder died (rc=$rc) after ${elapsed}s; restarting it in 2s" >&2
     sleep 2
   done
 }

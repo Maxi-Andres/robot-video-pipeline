@@ -19,6 +19,8 @@
 </style>
 
 <h1>video latency bench — one source, two branches, barcode-timed</h1>
+<div style="color:#888">session <b id="sid"></b> — close other bench tabs, they post to the same file</div>
+<script>addEventListener('DOMContentLoaded', () => {});</script>
 <div>
   <button id="go">start</button>
   <button id="rep">report &amp; reset window</button>
@@ -45,10 +47,16 @@ const P = new URLSearchParams(location.search);
 const MJPEG = P.get('mjpeg') || '/mjpeg';
 const WHEP  = P.get('whep')  || 'http://127.0.0.1:18889/lat/whep';
 const BARCODE = P.get('barcode') !== '0';   // real camera frames carry none
+// Every open tab measures its own RTCPeerConnection and posts to the same report file, so
+// without an identity here the windows of a forgotten tab silently mix into the aggregate —
+// which showed up as a NEGATIVE bitrate, bytesReceived appearing to go backwards.
+const SID = Math.random().toString(36).slice(2, 8);
+document.title = 'bench ' + SID;
 const EPOCH_BASE = 1789000000000, CELL = 16, BAND = 32, NBITS = 24, NCHK = 8, NCELL = 2 + NBITS + NCHK + 2;
 const MOD = 16777216;
 
 const log = m => { document.getElementById('log').textContent += m + '\n'; };
+document.getElementById('sid').textContent = SID;
 
 // ---- barcode ----------------------------------------------------------------
 // Samples the centre of each cell in the top band. Returns the frame's creation time in ms,
@@ -82,12 +90,29 @@ function latencyOf(v) {                       // v is ms-since-EPOCH_BASE mod 2^
 }
 
 // ---- stats ------------------------------------------------------------------
+// A hidden tab is throttled: Firefox stops firing requestVideoFrameCallback, so the gap
+// counter invents stalls that never happened — a 2893 ms "gap" was measured in a window
+// where getStats reported freezeCount 0. Gaps are therefore only counted while the page is
+// visible, and each window reports how long it was hidden so a polluted one is obvious.
+// getStats' own freezeCount is computed in the decoder and is NOT affected; when the two
+// disagree, believe getStats.
+let hiddenSince = document.hidden ? performance.now() : 0;
+let hiddenMs = 0;
+addEventListener('visibilitychange', () => {
+  if (document.hidden) hiddenSince = performance.now();
+  else if (hiddenSince) { hiddenMs += performance.now() - hiddenSince; hiddenSince = 0; }
+});
+const hiddenTotal = () => hiddenMs + (hiddenSince ? performance.now() - hiddenSince : 0);
+
 class Stats {
   constructor(name) { this.name = name; this.reset(); }
   reset() { this.s = []; this.frames = 0; this.gaps = 0; this.maxGap = 0; this.last = 0; this.bad = 0; this.t0 = performance.now(); }
   add(lat) {
     const now = performance.now();
-    if (this.last) { const g = now - this.last; if (g > 200) { this.gaps++; this.maxGap = Math.max(this.maxGap, g); } }
+    if (this.last && !document.hidden) {
+      const g = now - this.last;
+      if (g > 200) { this.gaps++; this.maxGap = Math.max(this.maxGap, g); }
+    }
     this.last = now;
     this.frames++;
     if (lat !== null) this.s.push(lat);     // null = no barcode; the frame still counts
@@ -225,8 +250,10 @@ document.getElementById('go').onclick = async () => {
 
 async function report() {
   const rtc = window.rtcStats ? await window.rtcStats().catch(() => null) : null;
-  const body = { at: new Date().toISOString(), mjpeg_url: MJPEG, whep_url: WHEP,
-                 branches: [stA.snapshot(), stB.snapshot()], rtc };
+  const h = Math.round(hiddenTotal());
+  const body = { sid: SID, at: new Date().toISOString(), mjpeg_url: MJPEG, whep_url: WHEP,
+                 hidden_ms: h, branches: [stA.snapshot(), stB.snapshot()], rtc };
+  hiddenMs = 0; if (hiddenSince) hiddenSince = performance.now();
   try { await fetch('/report', { method: 'POST', body: JSON.stringify(body) }); log('[report] sent'); }
   catch (e) { log('[report] ' + e); }
   stA.reset(); stB.reset();

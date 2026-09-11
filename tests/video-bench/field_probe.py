@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 """Field baseline for the MJPEG live branch, read straight off the robot's :8093.
 
-Reports the three things the plan's targets are written in: latency, GAPS OVER 200 ms, and
-bitrate. The gap count is the one that decides — "lo inaceptable es el congelamiento de
-medio segundo" — and nothing in the repo measured it until now.
+Reports what the plan's targets are written in — latency, stalls and bitrate — and then
+SPLITS the stall by stage, which is the part that decides where to look next.
+
+mjpeg_server already stamps two robot-side times into every frame and nothing has ever read
+the difference between them:
+
+    t_in           pump() pulled the frame off go2_jpeg_stream's stdout  -> the VIDEOHUB's
+                   own cadence, since GetImageSample has already returned by then
+    t_out - t_in   what this process costs (a resize, if MJPEG_WIDTH > 0)
+    now  - t_out   everything after the robot: link, and our own read
+
+So a stall seen here is attributable: if consecutive t_in values also jump, the source
+stalled and no transport will fix it; if they do not, it happened downstream. MEASURED
+2026-09-11 by cable, both branches froze with packetsLost=0, which is what makes this split
+the next question rather than a curiosity.
 
 Reuses mjpeg_server's COM stamp and the SNTP-style clock offset from tests/_latency_probe.py
 (the two machines are not NTP-locked to each other). Differs from that probe in what it is
@@ -65,8 +77,8 @@ def main():
 
     r = urllib.request.urlopen(f"{MJPEG}/stream", timeout=15)
     buf = b""
-    lat, ivals, nbytes, n, unstamped = [], [], 0, 0, 0
-    last = None
+    frames = []          # (arrival, t_in, t_out) — t_in/t_out on the ROBOT's clock
+    nbytes, n, unstamped = 0, 0, 0
     t_end = time.time() + secs
     while time.time() < t_end:
         chunk = r.read(65536)
@@ -85,42 +97,59 @@ def main():
             now = time.time()
             n += 1
             nbytes += len(frame)
-            if last is not None:
-                ivals.append((now - last) * 1000)
-            last = now
             stamp = read_stamp(frame)
             if stamp is None:
                 unstamped += 1
             else:
-                t_in, _t_out = stamp
-                # t_in is on the robot's clock; correct it onto ours before subtracting.
-                lat.append((now - (t_in - off)) * 1000)
+                frames.append((now, stamp[0], stamp[1]))
     r.close()
 
-    dur = secs
-    print(f"\nMJPEG branch, {n} frames in {dur:.0f} s")
-    print(f"  rate    : {n/dur:.2f} fps")
-    print(f"  bitrate : {nbytes/dur/1024:.0f} kB/s  ({nbytes*8/dur/1e6:.2f} Mbps)")
+    print(f"\nMJPEG branch, {n} frames in {secs:.0f} s")
+    print(f"  rate    : {n/secs:.2f} fps")
+    print(f"  bitrate : {nbytes/secs/1024:.0f} kB/s  ({nbytes*8/secs/1e6:.2f} Mbps) per viewer")
     print(f"  frame   : {nbytes/max(n,1)/1024:.0f} KB mean")
-    if lat:
-        print(f"  latency : p50 {pct(lat,.5):.0f}  p95 {pct(lat,.95):.0f}  "
-              f"max {max(lat):.0f}  min {min(lat):.0f} ms   (capture -> here)")
-    else:
-        print(f"  latency : not measurable — {unstamped} frames carried no COM stamp "
-              f"(set STAMP=1 in video.env)")
-    if ivals:
-        med = st.median(ivals)
-        # An absolute >200 ms threshold is meaningless when the branch is CAPPED at 5 fps:
-        # 200 ms is then the nominal spacing, so every frame would count as a gap. What a
-        # freeze actually looks like is a frame arriving late RELATIVE to the cadence, so
-        # report both and let the cadence be visible.
-        stalls = [g for g in ivals if g > 2 * med]
-        print(f"  cadence : {med:.0f} ms median between frames "
-              f"({1000/med:.1f} fps nominal)")
-        print(f"  gaps >200ms      : {sum(1 for g in ivals if g > 200)}  "
-              f"(meaningless if the cadence above is near 200)")
-        flag = "" if not stalls else "   <-- the freeze the plan is about"
-        print(f"  STALLS >2x cadence: {len(stalls)}  worst {max(ivals):.0f} ms{flag}")
+    if not frames:
+        print(f"  no stamped frames ({unstamped} unstamped) — set STAMP=1 in video.env")
+        return
+
+    def deltas(xs):
+        return [(b - a) * 1000 for a, b in zip(xs, xs[1:])]
+
+    arrival = deltas([f[0] for f in frames])
+    source = deltas([f[1] for f in frames])
+    inside = [(f[2] - f[1]) * 1000 for f in frames]
+    transport = [(f[0] - (f[2] - off)) * 1000 for f in frames]
+
+    def stalls(ds):
+        """Intervals over twice the median. An absolute threshold is useless here: a branch
+        capped at 5 fps has a 200 ms nominal spacing, so every frame would count."""
+        med = st.median(ds)
+        return med, [i for i, d in enumerate(ds) if d > 2 * med]
+
+    med_a, st_a = stalls(arrival)
+    med_s, st_s = stalls(source)
+    # A viewer stall is "explained" when the very interval it sits on also stalled at source.
+    explained = len(set(st_a) & set(st_s))
+
+    print(f"\n  per-stage, {len(frames)} stamped frames")
+    print(f"    source cadence (t_in)      : {med_s:.0f} ms median, {1000/med_s:.1f} fps")
+    print(f"    mjpeg_server cost (t_out-t_in): p50 {pct(inside,.5):.1f}  max {max(inside):.1f} ms")
+    print(f"    transport (t_out -> here)  : p50 {pct(transport,.5):.0f}  p95 {pct(transport,.95):.0f}"
+          f"  max {max(transport):.0f} ms")
+    print(f"    viewer cadence (arrival)   : {med_a:.0f} ms median")
+
+    print("\n  STALLS (interval over 2x its own median)")
+    print(f"    at the source (videohub)   : {len(st_s)}  worst {max(source):.0f} ms")
+    print(f"    at the viewer (here)       : {len(st_a)}  worst {max(arrival):.0f} ms")
+    if st_a:
+        print(f"    of the {len(st_a)} viewer stalls, {explained} coincide with a source stall "
+              f"({100*explained/len(st_a):.0f}%)")
+        if explained >= 0.8 * len(st_a):
+            print("    -> the SOURCE stalls. No transport change can fix this.")
+        elif explained <= 0.2 * len(st_a):
+            print("    -> stalls appear DOWNSTREAM of mjpeg_server: link or reader.")
+        else:
+            print("    -> mixed: both the source and something downstream contribute.")
 
 
 if __name__ == "__main__":
