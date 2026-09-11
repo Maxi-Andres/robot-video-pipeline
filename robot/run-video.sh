@@ -43,6 +43,8 @@
 #   MJPEG_ENABLE  1 (default) = also serve the raw JPEGs over HTTP for the live view
 #   MJPEG_PORT    HTTP port for that            (default 8093)
 #   MJPEG_FPS     cap for HTTP viewers only     (0 = every frame; does not affect the NVR)
+#   NVR_FPS       rate mjpeg_server feeds the encoder (default 5). Read here ONLY to
+#                 pre-divide the bitrate — see the rate-control block below.
 set -uo pipefail    # NOT -e: the supervision loop must survive child failures
 cd "$(dirname "$0")/.."
 
@@ -91,6 +93,46 @@ export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interface
 [ -x ./go2_jpeg_stream ] || { echo "build first: UNITREE_SDK2_DIR=~/unitree_sdk2 ./build.sh" >&2; exit 1; }
 command -v gst-launch-1.0 >/dev/null || { echo "gst-launch-1.0 missing" >&2; exit 1; }
 
+# ---------------------------------------------------------------------------------------
+# Rate control has no time base on this stack, so the bitrate has to be pre-divided.
+#
+# MEASURED ON THE ROBOT 2026-09-11: `fdsrc ! jpegparse` negotiates framerate=1/1, because a
+# raw JPEG stream carries no timing of its own. nvv4l2h264enc therefore spends the whole
+# `bitrate` budget on EVERY frame. At the 4.7 fps actually fed, that predicts
+# 1.5 Mbps x 4.7 = 7.05 Mbps — and 6.97 Mbps was what arrived at HQ. The property is
+# honoured; the time base is what is wrong. control-rate=1 (CBR) does not help, because CBR
+# is still constant with respect to that same broken clock.
+#
+# Every honest way of fixing the time base FAILED here (GStreamer 1.16, L4T), each measured:
+#   * framerate on the NVMM caps  -> nvvidconv cannot convert framerate; negotiation fails
+#                                    and the pipeline never starts (0 frames)
+#   * capssetter, join or replace -> encodes exactly ONE frame. Measured both ways.
+#   * videorate in system memory  -> "Internal data stream error" (0 frames)
+#
+# So divide instead: against a fixed 1/1 time base, a per-frame budget of BITRATE/fps yields
+# BITRATE per second. Measured 1452 kbps against a 1500 target while keeping all 94 frames —
+# the bitrate falls, the picture rate does not.
+#
+# THE CATCH, and the reason this is printed at startup instead of hidden: the divisor has to
+# match the rate actually reaching the encoder, and being wrong scales the bitrate by exactly
+# that factor. mjpeg_server gates the recording branch to NVR_FPS, so that is the rate
+# whenever it is the tee; with MJPEG_ENABLE=0 the tee is a plain passthrough and the encoder
+# sees the capture rate instead.
+# ---------------------------------------------------------------------------------------
+NVR_FPS="${NVR_FPS:-5}"
+if [ "$MJPEG_ENABLE" = 1 ] && awk "BEGIN{exit !($NVR_FPS > 0)}"; then
+  ENC_FPS="$NVR_FPS"                 # the tee gates the encoder to this
+elif [ "$MAXFPS" != 0 ]; then
+  ENC_FPS="$MAXFPS"                  # no gate, but the capture is capped
+else
+  ENC_FPS=15
+  echo "[robot-video] WARNING: capture uncapped and no tee gate; assuming ${ENC_FPS} fps" \
+       "for rate control. If the real rate differs, the bitrate is off by that ratio." >&2
+fi
+ENC_BITRATE=$(awk "BEGIN{printf \"%d\", $BITRATE / $ENC_FPS}")
+echo "[robot-video] rate control: ${BITRATE} bps at ${ENC_FPS} fps" \
+     "-> ${ENC_BITRATE} per frame (the encoder's time base is 1/1 on this stack)"
+
 echo "[robot-video] NIC=$NIC maxfps=$MAXFPS proto=$PROTO -> ${PUBLISH_HOST}:${PUBLISH_PORT}/${STREAM}"
 [ "$MJPEG_ENABLE" = 1 ] && echo "[robot-video] low-latency live view: http://<robot>:${MJPEG_PORT}/stream"
 
@@ -132,19 +174,14 @@ encode_and_publish() {
     # that is the GStreamer equivalent of the `-vsync cfr` fix the desktop pipeline needed.
     # config-interval=-1 so SPS/PPS ride with every keyframe: a viewer joining mid-stream
     # otherwise gets "non-existing PPS" and never decodes a frame.
-    # control-rate=1 is CBR, and it is the difference between `bitrate` being a setting and
-    # being a suggestion. MEASURED 2026-09-11 without it: BITRATE=1500000 configured, and
-    # the stream arrived at HQ at 6.5 Mbps with ~193 KB frames against the 234 KB JPEGs it
-    # was meant to replace — i.e. the whole point of encoding, 7x less data, was not
-    # happening. On a link where bandwidth is the constraint, an encoder that overshoots by
-    # 4x is worse than no encoder at all, because it costs the latency too.
+    # bitrate is ENC_BITRATE, not BITRATE — see the block above main() for why.
     #
     # peak-bitrate is deliberately NOT set: gst-inspect on this robot documents it as
     # "Peak bitrate in variable control-rate", so it applies to VBR only and would be
-    # silently ignored here. Switch control-rate to 0 if you ever want that trade.
+    # silently ignored here. Switch CONTROL_RATE to 0 if you ever want that trade.
     gst-launch-1.0 -q \
       fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
-      ! nvv4l2h264enc bitrate="$BITRATE" control-rate="$CONTROL_RATE" \
+      ! nvv4l2h264enc bitrate="$ENC_BITRATE" control-rate="$CONTROL_RATE" \
         insert-sps-pps=1 idrinterval="$IDR_FRAMES" \
         iframeinterval="$IDR_FRAMES" maxperf-enable=1 \
       ! h264parse config-interval=-1 ! $SINK
