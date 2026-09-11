@@ -1,0 +1,240 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>video latency bench</title>
+<style>
+  body { background:#111; color:#ddd; font:13px/1.4 ui-monospace,monospace; margin:0; padding:12px; }
+  h1 { font-size:14px; margin:0 0 10px; color:#8cf; }
+  .row { display:flex; gap:12px; flex-wrap:wrap; }
+  .pane { background:#000; border:1px solid #333; padding:8px; flex:1 1 460px; min-width:320px; }
+  .pane h2 { font-size:12px; margin:0 0 6px; color:#fc6; }
+  canvas, video { width:100%; max-width:520px; display:block; background:#222; }
+  table { border-collapse:collapse; margin-top:6px; width:100%; }
+  td { padding:1px 8px 1px 0; }
+  td.k { color:#888; }
+  td.v { color:#fff; text-align:right; font-variant-numeric:tabular-nums; }
+  .bad { color:#f66; }
+  .ok  { color:#6f6; }
+  #log { color:#999; white-space:pre-wrap; margin-top:10px; font-size:12px; }
+  button { background:#234; color:#cde; border:1px solid #456; padding:4px 10px; cursor:pointer; }
+</style>
+
+<h1>video latency bench — one source, two branches, barcode-timed</h1>
+<div>
+  <button id="go">start</button>
+  <button id="rep">report &amp; reset window</button>
+  <span id="state" style="margin-left:12px;color:#888"></span>
+</div>
+
+<div class="row" style="margin-top:10px">
+  <div class="pane">
+    <h2>A · MJPEG over HTTP (today's live path)</h2>
+    <canvas id="cvA"></canvas>
+    <table id="tA"></table>
+  </div>
+  <div class="pane">
+    <h2>B · H.264 → RTMP → mediamtx → WebRTC</h2>
+    <video id="vid" autoplay muted playsinline></video>
+    <canvas id="cvB" style="display:none"></canvas>
+    <table id="tB"></table>
+  </div>
+</div>
+<div id="log"></div>
+
+<script>
+const P = new URLSearchParams(location.search);
+const MJPEG = P.get('mjpeg') || '/mjpeg';
+const WHEP  = P.get('whep')  || 'http://127.0.0.1:18889/lat/whep';
+const BARCODE = P.get('barcode') !== '0';   // real camera frames carry none
+const EPOCH_BASE = 1789000000000, CELL = 16, BAND = 32, NBITS = 24, NCHK = 8, NCELL = 2 + NBITS + NCHK + 2;
+const MOD = 16777216;
+
+const log = m => { document.getElementById('log').textContent += m + '\n'; };
+
+// ---- barcode ----------------------------------------------------------------
+// Samples the centre of each cell in the top band. Returns the frame's creation time in ms,
+// or null when the guards or the checksum disagree — a partially decoded frame must never
+// be counted, it would look like a wild latency.
+function readStamp(ctx) {
+  const d = ctx.getImageData(0, 0, NCELL * CELL, BAND).data;
+  const w = NCELL * CELL, yc = (BAND / 2) | 0;
+  const bits = [];
+  for (let i = 0; i < NCELL; i++) {
+    const xc = i * CELL + (CELL >> 1);
+    let sum = 0, n = 0;
+    for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+      const o = ((yc + dy) * w + (xc + dx)) * 4;
+      sum += d[o] + d[o + 1] + d[o + 2]; n += 3;
+    }
+    bits.push(sum / n > 128 ? 1 : 0);
+  }
+  if (bits[0] !== 1 || bits[1] !== 0 || bits[NCELL - 2] !== 0 || bits[NCELL - 1] !== 1) return null;
+  let v = 0;
+  for (let i = 2; i < 2 + NBITS; i++) v = v * 2 + bits[i];
+  let c = 0;
+  for (let i = 2 + NBITS; i < 2 + NBITS + NCHK; i++) c = c * 2 + bits[i];
+  const want = ((v & 0xFF) + ((v >> 8) & 0xFF) + ((v >> 16) & 0xFF)) & 0xFF;
+  return c === want ? v : null;
+}
+
+function latencyOf(v) {                       // v is ms-since-EPOCH_BASE mod 2^24
+  const base = Date.now() - EPOCH_BASE;
+  return ((base - v) % MOD + MOD) % MOD;      // latency is well under the 16.7 s wrap
+}
+
+// ---- stats ------------------------------------------------------------------
+class Stats {
+  constructor(name) { this.name = name; this.reset(); }
+  reset() { this.s = []; this.frames = 0; this.gaps = 0; this.maxGap = 0; this.last = 0; this.bad = 0; this.t0 = performance.now(); }
+  add(lat) {
+    const now = performance.now();
+    if (this.last) { const g = now - this.last; if (g > 200) { this.gaps++; this.maxGap = Math.max(this.maxGap, g); } }
+    this.last = now;
+    this.frames++;
+    if (lat !== null) this.s.push(lat);     // null = no barcode; the frame still counts
+  }
+  pct(p) { if (!this.s.length) return NaN; const a = [...this.s].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(p * a.length))]; }
+  get fps() { return this.frames / ((performance.now() - this.t0) / 1000); }
+  snapshot() {
+    return { name: this.name, n: this.frames, nlat: this.s.length, fps: +this.fps.toFixed(2), undecodable: this.bad,
+             p50: this.pct(.5), p95: this.pct(.95), max: this.s.length ? Math.max(...this.s) : NaN,
+             min: this.s.length ? Math.min(...this.s) : NaN, gaps_over_200ms: this.gaps, max_gap_ms: Math.round(this.maxGap) };
+  }
+}
+const stA = new Stats('mjpeg'), stB = new Stats('webrtc');
+
+function render(tbl, st) {
+  const s = st.snapshot();
+  const g = s.gaps_over_200ms;
+  tbl.innerHTML = `
+    <tr><td class="k">frames</td><td class="v">${s.n}  @ ${s.fps} fps</td></tr>
+    <tr><td class="k">latency p50</td><td class="v">${Math.round(s.p50)} ms</td></tr>
+    <tr><td class="k">latency p95</td><td class="v">${Math.round(s.p95)} ms</td></tr>
+    <tr><td class="k">min / max</td><td class="v">${Math.round(s.min)} / ${Math.round(s.max)} ms</td></tr>
+    <tr><td class="k">gaps &gt; 200 ms</td><td class="v ${g ? 'bad' : 'ok'}">${g}  (worst ${s.max_gap_ms} ms)</td></tr>
+    <tr><td class="k">undecodable</td><td class="v">${s.undecodable}</td></tr>`;
+}
+setInterval(() => { render(document.getElementById('tA'), stA); render(document.getElementById('tB'), stB); }, 400);
+
+// ---- branch A: MJPEG over HTTP ---------------------------------------------
+// fetch + manual multipart parse + createImageBitmap, i.e. the same shape as the
+// production CameraCanvas — swapping an <img> src per frame is what caused the black
+// flicker that fix #4 removed.
+async function runMjpeg(url) {
+  const cv = document.getElementById('cvA'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  const res = await fetch(url);
+  const reader = res.body.getReader();
+  let buf = new Uint8Array(0);
+  const push = c => { const n = new Uint8Array(buf.length + c.length); n.set(buf); n.set(c, buf.length); buf = n; };
+  const find = (hay, needle, from) => {
+    outer: for (let i = from; i <= hay.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+      return i;
+    }
+    return -1;
+  };
+  const SOI = [0xFF, 0xD8], EOI = [0xFF, 0xD9];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    push(value);
+    for (;;) {
+      const s = find(buf, SOI, 0);
+      if (s < 0) break;
+      const e = find(buf, EOI, s + 2);
+      if (e < 0) { if (s > 0) buf = buf.slice(s); break; }
+      const jpg = buf.slice(s, e + 2);
+      buf = buf.slice(e + 2);
+      const bmp = await createImageBitmap(new Blob([jpg], { type: 'image/jpeg' }));
+      if (cv.width !== bmp.width) { cv.width = bmp.width; cv.height = bmp.height; }
+      ctx.drawImage(bmp, 0, 0);
+      bmp.close();
+      if (!BARCODE) { stA.add(null); } else {
+        const v = readStamp(ctx);
+        if (v === null) stA.bad++; else stA.add(latencyOf(v));
+      }
+    }
+  }
+  log('[mjpeg] stream ended');
+}
+
+// ---- branch B: WHEP -> <video> ---------------------------------------------
+async function runWhep(url) {
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  pc.addTransceiver('video', { direction: 'recvonly' });
+  const vid = document.getElementById('vid');
+  pc.ontrack = e => { vid.srcObject = e.streams[0]; };
+  pc.oniceconnectionstatechange = () => log('[whep] ice: ' + pc.iceConnectionState);
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(r => {
+    if (pc.iceGatheringState === 'complete') return r();
+    pc.onicegatheringstatechange = () => pc.iceGatheringState === 'complete' && r();
+    setTimeout(r, 2000);                       // non-trickle: send what we have
+  });
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/sdp' }, body: pc.localDescription.sdp });
+  if (!res.ok) { log('[whep] HTTP ' + res.status + ' ' + (await res.text()).slice(0, 200)); return; }
+  await pc.setRemoteDescription({ type: 'answer', sdp: await res.text() });
+  log('[whep] connected to ' + url);
+
+  // The browser's own accounting of where the time goes. jitterBufferDelay/EmittedCount is
+  // the average time a frame waits in the playout buffer, i.e. the part of the WebRTC
+  // latency that is the receiver's choice rather than the pipeline's cost. freezeCount is
+  // the metric the whole exercise is about.
+  window.rtcStats = async () => {
+    const out = {};
+    (await pc.getStats()).forEach(r => {
+      if (r.type === 'inbound-rtp' && r.kind === 'video') {
+        out.jitterBufferMs = r.jitterBufferEmittedCount ? Math.round(1000 * r.jitterBufferDelay / r.jitterBufferEmittedCount) : null;
+        out.framesDecoded = r.framesDecoded; out.framesDropped = r.framesDropped;
+        out.freezeCount = r.freezeCount; out.totalFreezesDuration = r.totalFreezesDuration;
+        out.packetsLost = r.packetsLost; out.packetsReceived = r.packetsReceived;
+        out.jitter = r.jitter; out.frameWidth = r.frameWidth; out.frameHeight = r.frameHeight;
+        out.bytesReceived = r.bytesReceived; out.at = r.timestamp;   // diffed between windows -> bitrate
+      }
+      if (r.type === 'candidate-pair' && r.state === 'succeeded') out.rttMs = Math.round(1000 * (r.currentRoundTripTime || 0));
+    });
+    return out;
+  };
+
+  const cv = document.getElementById('cvB'), ctx = cv.getContext('2d', { willReadFrequently: true });
+  const tick = () => {
+    if (vid.videoWidth) {
+      if (cv.width !== vid.videoWidth) { cv.width = vid.videoWidth; cv.height = vid.videoHeight; }
+      if (!BARCODE) {
+        stB.add(null);                       // no pixel read needed: saves a getImageData
+      } else {
+        ctx.drawImage(vid, 0, 0);
+        const v = readStamp(ctx);
+        if (v === null) stB.bad++; else stB.add(latencyOf(v));
+      }
+    }
+    if (vid.requestVideoFrameCallback) vid.requestVideoFrameCallback(tick); else requestAnimationFrame(tick);
+  };
+  if (vid.requestVideoFrameCallback) vid.requestVideoFrameCallback(tick); else requestAnimationFrame(tick);
+}
+
+// ---- drive ------------------------------------------------------------------
+document.getElementById('go').onclick = async () => {
+  document.getElementById('go').disabled = true;
+  document.getElementById('state').textContent = 'running…';
+  log('mjpeg: ' + MJPEG);
+  log('whep : ' + WHEP);
+  if (MJPEG === 'off') log('[mjpeg] disabled (measured server-side by field_probe.py)');
+  else runMjpeg(MJPEG).catch(e => log('[mjpeg] ' + e));
+  runWhep(WHEP).catch(e => log('[whep] ' + e));
+};
+
+async function report() {
+  const rtc = window.rtcStats ? await window.rtcStats().catch(() => null) : null;
+  const body = { at: new Date().toISOString(), mjpeg_url: MJPEG, whep_url: WHEP,
+                 branches: [stA.snapshot(), stB.snapshot()], rtc };
+  try { await fetch('/report', { method: 'POST', body: JSON.stringify(body) }); log('[report] sent'); }
+  catch (e) { log('[report] ' + e); }
+  stA.reset(); stB.reset();
+}
+document.getElementById('rep').onclick = report;
+
+// Auto-start: the bench has to be readable from the shell without anyone clicking.
+// The <video> is muted, so autoplay is allowed.
+addEventListener('load', () => document.getElementById('go').click());
+setInterval(report, 30000);                    // a rolling 30 s window, readable from the shell
+</script>
