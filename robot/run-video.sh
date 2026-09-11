@@ -93,23 +93,76 @@ echo "[robot-video] NIC=$NIC maxfps=$MAXFPS proto=$PROTO -> ${PUBLISH_HOST}:${PU
 [ "$MJPEG_ENABLE" = 1 ] && echo "[robot-video] low-latency live view: http://<robot>:${MJPEG_PORT}/stream"
 
 running=1
-cleanup() { running=0; pkill -P $$ 2>/dev/null || true; }
+# Kill the process GROUP, not just direct children. The encoder is supervised in a sub-shell
+# now, so gst-launch is a grandchild and `pkill -P $$` would leave it alive holding the RTMP
+# socket. Under systemd this is belt-and-braces — the default KillMode=control-group already
+# tears down the whole cgroup — but it is what makes Ctrl-C on a manual run clean.
+cleanup() { running=0; kill -- "-$$" 2>/dev/null || pkill -P $$ 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
+
+# The encoder is the half that dies, and it used to take the recording branch down for good.
+#
+# MEASURED 2026-09-11: `nvv4l2h264enc` aborts with "free(): double free detected in tcache 2"
+# at unpredictable intervals — 2 s, 10 s, and over 20 s in three runs of the same pipeline.
+# The message lands right after the NVENC banner because that is the encoder's last line;
+# the abort is in its teardown, a known L4T fault. Every input was cleared as innocent:
+# bitrate, CBR, the nvjpegdec chain on real camera bytes, software jpegdec, 4:2:0 vs 4:2:2,
+# restart markers, and rtmpsink against two different servers.
+#
+# What turned an intermittent crash into a PERMANENT outage was this loop. `gst-launch` dies,
+# mjpeg_server takes the EPIPE on its next write, logs "downstream (NVR) closed" and — by
+# design, because the live view must survive — keeps running. So the pipeline never ends,
+# bash keeps waiting on it, and this loop never gets to iterate. The branch stays dead until
+# someone restarts the unit by hand, which is how it was found disabled with NVR_ENABLE=0.
+#
+# So supervise the encoder SEPARATELY. Restarting it costs a few seconds of recording;
+# restarting the whole chain would also blink the live view, which is what you steer by, and
+# would re-open the camera. Nothing new is needed to hold the stream meanwhile: the sub-shell
+# keeps the same pipe on fd 0 across encoder restarts, so while gst is down mjpeg_server just
+# blocks on stdout — exactly what its nvr_writer is documented to be the only thing allowed
+# to do — and its bounded queue drops frames rather than growing latency.
+encode_and_publish() {
+  local fails=0 started rc
+  while :; do
+    started=$SECONDS
+    # do-timestamp=true because the JPEGs arrive with no timestamps of their own and at an
+    # irregular cadence. If the publish ever stalls, insert `videorate` after the decoder —
+    # that is the GStreamer equivalent of the `-vsync cfr` fix the desktop pipeline needed.
+    # config-interval=-1 so SPS/PPS ride with every keyframe: a viewer joining mid-stream
+    # otherwise gets "non-existing PPS" and never decodes a frame.
+    gst-launch-1.0 -q \
+      fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
+      ! nvv4l2h264enc bitrate="$BITRATE" insert-sps-pps=1 idrinterval="$IDR_FRAMES" \
+        iframeinterval="$IDR_FRAMES" maxperf-enable=1 \
+      ! h264parse config-interval=-1 ! $SINK
+    rc=$?
+
+    # Exit 0 is a clean EOS: the capture upstream closed, so there is nothing left to
+    # encode and the OUTER loop should rebuild the whole chain. Anything else is the
+    # encoder falling over on its own while frames are still coming.
+    [ "$rc" = 0 ] && { echo "[robot-video] encoder reached EOS (upstream gone)" >&2; return 0; }
+
+    # A run that lasted a while is a one-off; only back-to-back failures mean the encoder
+    # cannot start at all, in which case rebuilding the capture side is worth a try.
+    if [ $((SECONDS - started)) -ge 30 ]; then
+      fails=0
+    else
+      fails=$((fails + 1))
+    fi
+    if [ "$fails" -ge 5 ]; then
+      echo "[robot-video] encoder failed $fails times in a row (rc=$rc); rebuilding capture" >&2
+      return 1
+    fi
+    echo "[robot-video] encoder died (rc=$rc) after $((SECONDS - started))s; restarting it in 2s" >&2
+    sleep 2
+  done
+}
 
 while [ "$running" = 1 ]; do
   echo "[robot-video] starting capture -> HW encode -> $PROTO publish"
   # go2_jpeg_stream exits after ~8 s without frames (robot's camera service down), which
   # EOFs the pipeline; the loop then republishes cleanly once video is back.
-  # do-timestamp=true because the JPEGs arrive with no timestamps of their own and at an
-  # irregular cadence. If the publish ever stalls, insert `videorate` after the decoder —
-  # that is the GStreamer equivalent of the `-vsync cfr` fix the desktop pipeline needed.
-  # config-interval=-1 so SPS/PPS ride with every keyframe: a viewer joining mid-stream
-  # otherwise gets "non-existing PPS" and never decodes a frame.
-  ./go2_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | gst-launch-1.0 -q \
-    fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
-    ! nvv4l2h264enc bitrate="$BITRATE" insert-sps-pps=1 idrinterval="$IDR_FRAMES" \
-      iframeinterval="$IDR_FRAMES" maxperf-enable=1 \
-    ! h264parse config-interval=-1 ! $SINK || true
+  ./go2_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | encode_and_publish || true
 
   [ "$running" = 1 ] && { echo "[robot-video] pipeline ended; retry in 3s" >&2; sleep 3; }
 done
