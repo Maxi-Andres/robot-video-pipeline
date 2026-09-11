@@ -35,6 +35,7 @@
 #   PUBLISH_PORT  1935 for rtmp, 8890 for srt    (default follows PROTO)
 #   STREAM        mediamtx path to publish into  (default robot)
 #   BITRATE       H.264 bitrate in bits/s        (default 2000000)
+#   CONTROL_RATE  1 = CBR (default), 0 = VBR      (VBR ignores BITRATE in practice)
 #   LATENCY       SRT latency budget in ms       (default 300; raise on satellite links)
 #   WIDTH/HEIGHT  scale before encoding          (empty = native 1920x1080)
 #   IDR_FRAMES    keyframe interval in frames    (default 15 = 1/s at 15fps; lower = faster
@@ -51,6 +52,7 @@ PUBLISH_HOST="${PUBLISH_HOST:-${SRT_HOST:?set PUBLISH_HOST to the machine runnin
 PROTO="${PROTO:-rtmp}"
 STREAM="${STREAM:-robot}"
 BITRATE="${BITRATE:-2000000}"
+CONTROL_RATE="${CONTROL_RATE:-1}"
 LATENCY="${LATENCY:-300}"
 WIDTH="${WIDTH:-}"
 HEIGHT="${HEIGHT:-}"
@@ -130,9 +132,20 @@ encode_and_publish() {
     # that is the GStreamer equivalent of the `-vsync cfr` fix the desktop pipeline needed.
     # config-interval=-1 so SPS/PPS ride with every keyframe: a viewer joining mid-stream
     # otherwise gets "non-existing PPS" and never decodes a frame.
+    # control-rate=1 is CBR, and it is the difference between `bitrate` being a setting and
+    # being a suggestion. MEASURED 2026-09-11 without it: BITRATE=1500000 configured, and
+    # the stream arrived at HQ at 6.5 Mbps with ~193 KB frames against the 234 KB JPEGs it
+    # was meant to replace — i.e. the whole point of encoding, 7x less data, was not
+    # happening. On a link where bandwidth is the constraint, an encoder that overshoots by
+    # 4x is worse than no encoder at all, because it costs the latency too.
+    #
+    # peak-bitrate is deliberately NOT set: gst-inspect on this robot documents it as
+    # "Peak bitrate in variable control-rate", so it applies to VBR only and would be
+    # silently ignored here. Switch control-rate to 0 if you ever want that trade.
     gst-launch-1.0 -q \
       fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
-      ! nvv4l2h264enc bitrate="$BITRATE" insert-sps-pps=1 idrinterval="$IDR_FRAMES" \
+      ! nvv4l2h264enc bitrate="$BITRATE" control-rate="$CONTROL_RATE" \
+        insert-sps-pps=1 idrinterval="$IDR_FRAMES" \
         iframeinterval="$IDR_FRAMES" maxperf-enable=1 \
       ! h264parse config-interval=-1 ! $SINK
     rc=$?
