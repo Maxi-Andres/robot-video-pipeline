@@ -28,6 +28,7 @@
 #     PROTO=srt below.
 #
 # Env:
+#   SOURCE    jpeg (default) or multicast       — see the SOURCE block below
 #   NIC       robot-internal interface for DDS   (default eth0)
 #   MAXFPS    cap the capture rate               (default 15 — bounds field bandwidth)
 #   PUBLISH_HOST  where mediamtx listens        (required)
@@ -48,6 +49,35 @@
 #                 pre-divide the bitrate — see the rate-control block below.
 set -uo pipefail    # NOT -e: the supervision loop must survive child failures
 cd "$(dirname "$0")/.."
+
+# WHERE THE PICTURE COMES FROM. Two sources, and they are not variations of each other:
+#
+#   jpeg       the camera's videohub, one JPEG per GetImageSample RPC, then decoded and
+#              re-encoded to H.264 on the Jetson. What has always run.
+#   multicast  the H.264 the Go2 ALREADY encodes, published as RTP on a multicast group
+#              (Unitree's Multimedia Services). Nothing is decoded and nothing is
+#              re-encoded: the bytes are depayloaded, parsed and muxed straight out.
+#
+# MEASURED 2026-09-14, same robot, same link:
+#
+#              | videohub + re-encode | multicast native
+#   resolution | 1080p                | 1280x720
+#   frames     | ~4.7 fps             | 13.9 fps
+#   robot->HQ  | 1.42 Mbps            | 2.02 Mbps
+#   per frame  | 0.30 Mbit            | 0.145 Mbit   (half)
+#   Jetson     | JPEG decode + encode | nothing, it is a passthrough
+#
+# The reason to care is not the bitrate, it is that `multicast` never asks the videohub for
+# anything — and the videohub is ~650 ms of the glass-to-glass, about 90% of it.
+#
+# NOT the DDS topic rt/frontvideostream. That one is a dead end: it exists and a subscriber
+# MATCHES its publisher, but no sample is ever delivered — reproduced from INSIDE the Jetson,
+# which is what the old plan assumed would fix it. See robot-splunk-docs/PLAN-VIDEO.md.
+#
+# Default stays `jpeg` until the latency of `multicast` is measured rather than assumed.
+SOURCE="${SOURCE:-jpeg}"
+MCAST_ADDR="${MCAST_ADDR:-230.1.1.1}"
+MCAST_PORT="${MCAST_PORT:-1720}"
 
 NIC="${NIC:-eth0}"
 MAXFPS="${MAXFPS:-15}"
@@ -72,6 +102,13 @@ if [ -n "$WIDTH" ] && [ -n "$HEIGHT" ]; then
   SCALE="! video/x-raw(memory:NVMM),width=$WIDTH,height=$HEIGHT "
 else
   SCALE=""
+fi
+
+# There is no JPEG stream to tee in `multicast` — the robot hands us H.264 directly, so the
+# MJPEG live view simply does not exist on that source. Say so instead of failing obscurely.
+if [ "$SOURCE" = multicast ] && [ "$MJPEG_ENABLE" = 1 ]; then
+  echo "[robot-video] SOURCE=multicast carries no JPEG: the MJPEG live view is off" >&2
+  MJPEG_ENABLE=0
 fi
 
 # The live view is served by the tee; without it the pipe is just a passthrough cat.
@@ -114,7 +151,9 @@ esac
 # receives nothing — same hard-won detail as the desktop pipeline.
 export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"$NIC\" priority=\"default\" multicast=\"default\"/></Interfaces></General></Domain></CycloneDDS>}"
 
-[ -x ./go2_jpeg_stream ] || { echo "build first: UNITREE_SDK2_DIR=~/unitree_sdk2 ./build.sh" >&2; exit 1; }
+if [ "$SOURCE" = jpeg ]; then
+  [ -x ./go2_jpeg_stream ] || { echo "build first: UNITREE_SDK2_DIR=~/unitree_sdk2 ./build.sh" >&2; exit 1; }
+fi
 command -v gst-launch-1.0 >/dev/null || { echo "gst-launch-1.0 missing" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------------------
@@ -144,7 +183,12 @@ command -v gst-launch-1.0 >/dev/null || { echo "gst-launch-1.0 missing" >&2; exi
 # sees the capture rate instead.
 # ---------------------------------------------------------------------------------------
 NVR_FPS="${NVR_FPS:-5}"
-if [ "$MJPEG_ENABLE" = 1 ] && awk "BEGIN{exit !($NVR_FPS > 0)}"; then
+# `multicast` never encodes, so there is no bitrate to divide and nothing to report. Saying
+# it anyway would be a line of output about a knob that does not exist on that source.
+if [ "$SOURCE" != jpeg ]; then
+  ENC_FPS=0
+  ENC_BITRATE=0
+elif [ "$MJPEG_ENABLE" = 1 ] && awk "BEGIN{exit !($NVR_FPS > 0)}"; then
   ENC_FPS="$NVR_FPS"                 # the tee gates the encoder to this
 elif [ "$MAXFPS" != 0 ]; then
   ENC_FPS="$MAXFPS"                  # no gate, but the capture is capped
@@ -153,9 +197,32 @@ else
   echo "[robot-video] WARNING: capture uncapped and no tee gate; assuming ${ENC_FPS} fps" \
        "for rate control. If the real rate differs, the bitrate is off by that ratio." >&2
 fi
-ENC_BITRATE=$(awk "BEGIN{printf \"%d\", $BITRATE / $ENC_FPS}")
-echo "[robot-video] rate control: ${BITRATE} bps at ${ENC_FPS} fps" \
-     "-> ${ENC_BITRATE} per frame (the encoder's time base is 1/1 on this stack)"
+if [ "$SOURCE" = jpeg ]; then
+  ENC_BITRATE=$(awk "BEGIN{printf \"%d\", $BITRATE / $ENC_FPS}")
+  echo "[robot-video] rate control: ${BITRATE} bps at ${ENC_FPS} fps" \
+       "-> ${ENC_BITRATE} per frame (the encoder's time base is 1/1 on this stack)"
+fi
+
+# The half of the pipeline BEFORE the muxer, which is the only part the source changes.
+#
+# `multicast` is a passthrough: depayload the RTP, parse the Annex-B, done. No decoder and no
+# encoder appear at all — which is also why the double free in nvv4l2h264enc (still unexplained,
+# only mitigated by the supervisor below) cannot happen on this source.
+#
+# config-interval=-1 so SPS/PPS ride with every keyframe: a viewer joining mid-stream otherwise
+# gets "non-existing PPS" and never decodes a frame. It matters on BOTH sources.
+case "$SOURCE" in
+  jpeg)
+    HEAD="fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
+      ! nvv4l2h264enc bitrate=$ENC_BITRATE control-rate=$CONTROL_RATE \
+        insert-sps-pps=1 idrinterval=$IDR_FRAMES iframeinterval=$IDR_FRAMES maxperf-enable=1 \
+      ! h264parse config-interval=-1" ;;
+  multicast)
+    HEAD="udpsrc address=$MCAST_ADDR port=$MCAST_PORT multicast-iface=$NIC \
+      ! application/x-rtp,media=video,encoding-name=H264,payload=96 \
+      ! rtph264depay ! h264parse config-interval=-1" ;;
+  *) echo "SOURCE must be jpeg or multicast (got '$SOURCE')" >&2; exit 1 ;;
+esac
 
 echo "[robot-video] NIC=$NIC maxfps=$MAXFPS proto=$PROTO -> ${PUBLISH_HOST}:${PUBLISH_PORT}/${STREAM}"
 [ "$MJPEG_ENABLE" = 1 ] && echo "[robot-video] low-latency live view: http://<robot>:${MJPEG_PORT}/stream"
@@ -215,12 +282,7 @@ encode_and_publish() {
     # peak-bitrate is deliberately NOT set: gst-inspect on this robot documents it as
     # "Peak bitrate in variable control-rate", so it applies to VBR only and would be
     # silently ignored here. Switch CONTROL_RATE to 0 if you ever want that trade.
-    gst-launch-1.0 -q \
-      fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
-      ! nvv4l2h264enc bitrate="$ENC_BITRATE" control-rate="$CONTROL_RATE" \
-        insert-sps-pps=1 idrinterval="$IDR_FRAMES" \
-        iframeinterval="$IDR_FRAMES" maxperf-enable=1 \
-      ! h264parse config-interval=-1 ! $SINK
+    gst-launch-1.0 -q $HEAD ! $SINK
     rc=$?
 
     # Exit 0 is a clean EOS: nothing left to encode, so the OUTER loop should rebuild the
@@ -259,10 +321,17 @@ encode_and_publish() {
 }
 
 while [ "$running" = 1 ]; do
-  echo "[robot-video] starting capture -> HW encode -> $PROTO publish"
-  # go2_jpeg_stream exits after ~8 s without frames (robot's camera service down), which
-  # EOFs the pipeline; the loop then republishes cleanly once video is back.
-  ./go2_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | encode_and_publish || true
+  if [ "$SOURCE" = multicast ]; then
+    echo "[robot-video] starting multicast passthrough -> $PROTO publish"
+    # No capture process and no tee: gst joins the multicast group itself, so the whole
+    # chain is the one supervised command.
+    encode_and_publish || true
+  else
+    echo "[robot-video] starting capture -> HW encode -> $PROTO publish"
+    # go2_jpeg_stream exits after ~8 s without frames (robot's camera service down), which
+    # EOFs the pipeline; the loop then republishes cleanly once video is back.
+    ./go2_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | encode_and_publish || true
+  fi
 
   [ "$running" = 1 ] && { echo "[robot-video] pipeline ended; retry in 3s" >&2; sleep 3; }
 done
