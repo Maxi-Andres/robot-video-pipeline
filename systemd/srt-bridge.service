@@ -1,0 +1,41 @@
+# SRT receiver for the robot's H.264 stream, on the HQ side.
+#
+# WHY A BRIDGE AT ALL, and not just mediamtx's own SRT listener: the robot ships
+# libsrt 1.4.0 (Ubuntu 20.04) and mediamtx's Go SRT implementation REJECTS its handshake —
+# the robot logs "REJECT reported from HS processing" and mediamtx logs nothing at all,
+# which is the diagnostic trap. The same pipeline connects fine to an ffmpeg/libsrt
+# listener, so the incompatibility is libsrt-1.4.0 <-> mediamtx, not the robot or the link.
+# srt-live-transmit is that same libsrt (1.5.4 here), so it accepts the robot and hands the
+# stream to mediamtx over loopback UDP, where nothing can be lost.
+#
+#     robot --SRT/UDP--> srt-live-transmit --udp+mpegts--> mediamtx --WebRTC--> browser
+#                                                                 \--RTSP----> Frigate
+#
+# PORT 8891, NOT 8890. The plan says 8890, but production mediamtx already binds that for
+# its own (unusable from this robot) SRT listener, so the bridge would fail to start. Either
+# use 8891 as here, or set `srt: no` in mediamtx.yml and free 8890 — the config already
+# documents that listener as unusable, so freeing it is the tidier end state.
+#
+# Install:
+#   sudo apt install srt-tools
+#   mkdir -p ~/.config/systemd/user && cp systemd/srt-bridge.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now srt-bridge
+[Unit]
+Description=SRT -> UDP/MPEG-TS bridge for the robot video stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# -statsreport-frequency prints link stats (lost/retransmitted packets, RTT) to the journal
+# every 1000 packets, which is the only place SRT loss recovery becomes visible: by design
+# it hides the loss it repairs, so without this there is no way to tell a healthy link from
+# one the ARQ is quietly saving.
+ExecStart=/usr/bin/srt-live-transmit -statsreport-frequency:1000 -loglevel:note \
+  "srt://:8891?mode=listener&latency=150" \
+  "udp://127.0.0.1:9000"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
