@@ -11,6 +11,13 @@
 #     robot --SRT/UDP--> srt-live-transmit --udp+mpegts--> mediamtx --WebRTC--> browser
 #                                                                 \--RTSP----> Frigate
 #
+# THE RECEIVER NEEDS A BIG UDP BUFFER. mediamtx defaults udpReadBufferSize to 0 (212 KB),
+# and that silently loses 15% of the frames on this loopback hop: a keyframe arrives as a
+# burst, a burst overflows a small socket buffer, and one lost fragment costs everything up
+# to the next keyframe. MEASURED: 20 freezes totalling 64 s in 6 minutes, with SRT itself
+# reporting zero drops. Set udpReadBufferSize (4194304 here, capped by net.core.rmem_max)
+# in the mediamtx config that reads :9000 — production included, the day it moves there.
+#
 # PORT 8891, NOT 8890. The plan says 8890, but production mediamtx already binds that for
 # its own (unusable from this robot) SRT listener, so the bridge would fail to start. Either
 # use 8891 as here, or set `srt: no` in mediamtx.yml and free 8890 — the config already
