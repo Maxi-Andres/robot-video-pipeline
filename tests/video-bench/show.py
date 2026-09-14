@@ -28,7 +28,10 @@ def summarise(sid, rows):
     if dur <= 0:
         print("  windows out of order\n")
         return
-    print(f"  span          : {dur:.0f} s, {frames} frames ({frames/dur:.2f} fps)")
+    dec = rl.get("framesDecoded", 0) - rf.get("framesDecoded", 0)
+    print(f"  span          : {dur:.0f} s, {dec} frames decoded ({dec/dur:.2f} fps)")
+    if frames:
+        print(f"  presented     : {frames} ({frames/dur:.2f} fps as the compositor showed them)")
     if rl.get("bytesReceived") is not None and rf.get("bytesReceived") is not None:
         mbps = (rl["bytesReceived"] - rf["bytesReceived"]) * 8 / dur / 1e6
         flag = "   <-- NEGATIVE: sessions are mixed, this is not one connection" if mbps < 0 else ""
@@ -52,8 +55,12 @@ def main():
         if not line:
             continue
         d = json.loads(line)
-        if not d["branches"][1]["n"]:
-            continue                      # a tab that never started
+        # framesDecoded, not the rVFC frame count: a BACKGROUNDED tab stops firing
+        # requestVideoFrameCallback entirely, so branches[1].n goes to zero and a whole run
+        # looks like it never happened — which is exactly what it did once. getStats keeps
+        # counting in the decoder whether or not anything is painted.
+        if not (d.get("rtc") or {}).get("framesDecoded"):
+            continue                      # a tab that never connected
         sessions.setdefault(d.get("sid", "unknown"), []).append(d)
     if not sessions:
         print("no windows with WebRTC frames")

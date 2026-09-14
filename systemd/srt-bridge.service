@@ -27,11 +27,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# -statsreport-frequency prints link stats (lost/retransmitted packets, RTT) to the journal
-# every 1000 packets, which is the only place SRT loss recovery becomes visible: by design
-# it hides the loss it repairs, so without this there is no way to tell a healthy link from
-# one the ARQ is quietly saving.
-ExecStart=/usr/bin/srt-live-transmit -statsreport-frequency:1000 -loglevel:note \
+# The stats are the whole point of running this in the foreground of a unit: SRT HIDES the
+# loss it repairs, so without them a link the ARQ is quietly saving looks identical to a
+# healthy one. pktRcvLoss and pktRcvRetrans are the numbers that say how hard it is working,
+# and they are the ones that will decide plan A against plan B over LTE.
+#
+# The flag is -stats-report-frequency, with dashes. Spelled -statsreport-frequency it is
+# accepted and silently ignored, which is how it was first written here and why the first
+# run produced no statistics at all.
+ExecStart=/usr/bin/srt-live-transmit \
+  -stats-report-frequency:2000 -statspf:json -fullstats -loglevel:note \
   "srt://:8891?mode=listener&latency=150" \
   "udp://127.0.0.1:9000"
 Restart=always
