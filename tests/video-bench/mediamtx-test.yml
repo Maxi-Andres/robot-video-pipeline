@@ -7,6 +7,15 @@
 # this instance yields transfers.
 logLevel: info
 
+# The loopback UDP hop from srt-live-transmit is where frames were being lost, and the
+# default 212 KB socket buffer is why. MEASURED 2026-09-14: the robot's pipeline emits a
+# steady 4.55 fps, SRT delivers it with 0 packets dropped, and mediamtx still saw only
+# 3.86 fps — 15% gone — with the kernel counting UdpRcvbufErrors. Keyframes arrive as a
+# burst, so a burst is exactly what overflows a small buffer, and one lost keyframe fragment
+# costs everything up to the NEXT keyframe: the browser showed 20 freezes totalling 64 s.
+# Capped by net.core.rmem_max, which is 4 MB here.
+udpReadBufferSize: 4194304
+
 rtsp: yes
 rtspAddress: :18554
 rtpAddress: :18000
