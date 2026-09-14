@@ -17,6 +17,15 @@ hlsVariant: lowLatency
 # --- WebRTC: lowest-latency browser view -> http://<host>:8889/robot ---
 webrtc: yes
 webrtcAddress: :8889
+# TLS on the WebRTC endpoint, and it is not optional once the app is served over HTTPS.
+# The page derives the WHEP URL from its own origin, so on https it asks for https — and even
+# if it asked for http, a browser refuses mixed content from a secure page. Without this the
+# H.264 transport switch shows "connecting" and falls straight back to MJPEG, which is exactly
+# what it did. Same self-signed pair the rest of this stack uses; a browser needs the
+# exception accepted once per PORT, so visit https://<host>:8889/ and accept it.
+webrtcEncryption: yes
+webrtcServerKey: auto.key
+webrtcServerCert: auto.crt
 
 # Unused ingress/servers off.
 rtmp: yes

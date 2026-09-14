@@ -67,7 +67,26 @@ Two traps, both hit while building this:
   `freezeCount: 0`. Windows now report `hidden_ms`; when the two disagree, believe
   `freezeCount` — it is computed in the decoder.
 
-## 4. Isolating a pipeline stage from the robot and the link
+## 4. Comparing two paths without trusting any clock
+
+`correlate.py` answers "how much fresher is path A than path B" by aligning the two streams on
+CONTENT, not on timestamps. Capture both in parallel with per-frame arrival times, then:
+
+```bash
+python3 correlate.py <dir with mc/ jp/ index.txt>
+```
+
+Use it instead of a stopwatch whenever the two clocks are not the same machine's. MEASURED the
+hard way 2026-09-14: a stopwatch filmed off a laptop screen gave **-710 ms** and then
+**-1400 ms** — negative, so impossible, and inconsistent with each other, because that laptop's
+clock is neither ours nor stable. Correlation has no such dependency.
+
+It needs MOVEMENT in the scene. With a still room the peak came out at 1.7 sigmas and the curve
+was flat across ±70 ms — useless. With a hand waving in front of the camera it was 3.2 sigmas
+and unambiguous. The script prints that contrast so a weak result cannot be mistaken for a
+measurement.
+
+## 5. Isolating a pipeline stage from the robot and the link
 
 `synthetic_source.py` renders frames that carry their creation time as a barcode and feeds
 **both** branches from one render, so the difference between the two measured latencies is
