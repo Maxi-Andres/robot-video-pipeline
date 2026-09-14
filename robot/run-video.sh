@@ -92,7 +92,21 @@ case "$PROTO" in
         # Set SRT_STREAMID=publish:<path> only if you ever point this back at mediamtx.
         SRT_URI="srt://${PUBLISH_HOST}:${PUBLISH_PORT}?latency=${LATENCY}"
         [ -n "$SRT_STREAMID" ] && SRT_URI="${SRT_URI}&streamid=${SRT_STREAMID}"
-        SINK="mpegtsmux ! srtsink uri=${SRT_URI} sync=false" ;;
+        # alignment=7 is NOT optional, and leaving it out fails in the most confusing way
+        # possible. SRT in live mode carries at most 1316 bytes per message (7 x 188 TS
+        # packets); mpegtsmux without alignment emits buffers of whatever size it likes, and
+        # srtsink silently drops the ones that do not fit. The buffers that do not fit are
+        # the BIG ones — the keyframes.
+        #
+        # MEASURED 2026-09-14, same pipeline, 26 s, only this property changed:
+        #     mpegtsmux              ->  0 IDR,  0 SPS,  0 PPS
+        #     mpegtsmux alignment=7  ->  8 IDR,  8 SPS,  8 PPS
+        #
+        # With no keyframes and no parameter sets nothing can start decoding: the browser
+        # received 42388 packets and 49 MB with framesDecoded stuck at 0, and ffprobe said
+        # "non-existing PPS 0 referenced". The stream looks alive at every layer except the
+        # one that matters.
+        SINK="mpegtsmux alignment=7 ! srtsink uri=${SRT_URI} sync=false" ;;
   *)    echo "PROTO must be rtmp or srt (got '$PROTO')" >&2; exit 1 ;;
 esac
 
