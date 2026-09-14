@@ -40,5 +40,11 @@ paths:
   # target for the robot-side encoder diagnostic, so it never publishes into production
   diag:
     source: publisher
+  # The SRT path under test: srt-live-transmit listens for the robot and forwards the
+  # MPEG-TS here over loopback, where nothing can be lost. Syntax verified against
+  # mediamtx.stock.yml for v1.19.2, which documents udp+mpegts://ip:port as "the stream is
+  # pulled from MPEG-TS over UDP, by listening on the specified address".
+  srtin:
+    source: udp+mpegts://127.0.0.1:9000
 
 moq: no

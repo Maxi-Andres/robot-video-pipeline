@@ -32,7 +32,8 @@
 #   MAXFPS    cap the capture rate               (default 15 — bounds field bandwidth)
 #   PUBLISH_HOST  where mediamtx listens        (required)
 #   PROTO         rtmp (default) or srt          (srt needs a newer libsrt on the robot)
-#   PUBLISH_PORT  1935 for rtmp, 8890 for srt    (default follows PROTO)
+#   PUBLISH_PORT  1935 for rtmp, 8891 for srt    (default follows PROTO)
+#   SRT_STREAMID  empty (default) for srt-live-transmit; publish:<path> only for mediamtx
 #   STREAM        mediamtx path to publish into  (default robot)
 #   BITRATE       H.264 bitrate in bits/s        (default 2000000)
 #   CONTROL_RATE  1 = CBR (default), 0 = VBR      (VBR ignores BITRATE in practice)
@@ -53,6 +54,7 @@ MAXFPS="${MAXFPS:-15}"
 PUBLISH_HOST="${PUBLISH_HOST:-${SRT_HOST:?set PUBLISH_HOST to the machine running mediamtx}}"
 PROTO="${PROTO:-rtmp}"
 STREAM="${STREAM:-robot}"
+SRT_STREAMID="${SRT_STREAMID:-}"
 BITRATE="${BITRATE:-2000000}"
 CONTROL_RATE="${CONTROL_RATE:-1}"
 LATENCY="${LATENCY:-300}"
@@ -81,8 +83,16 @@ fi
 case "$PROTO" in
   rtmp) PUBLISH_PORT="${PUBLISH_PORT:-1935}"
         SINK="flvmux streamable=true ! rtmpsink location=rtmp://${PUBLISH_HOST}:${PUBLISH_PORT}/${STREAM}" ;;
-  srt)  PUBLISH_PORT="${PUBLISH_PORT:-8890}"
-        SINK="mpegtsmux ! srtsink uri=srt://${PUBLISH_HOST}:${PUBLISH_PORT}?streamid=publish:${STREAM}&latency=${LATENCY} sync=false" ;;
+  srt)  PUBLISH_PORT="${PUBLISH_PORT:-8891}"
+        # streamid is EMPTY by default, and that is the right default now. It only ever
+        # existed to tell mediamtx which path to publish into — and mediamtx's own SRT
+        # listener rejects this robot's libsrt 1.4.0 handshake, so that target does not
+        # work. What does work is srt-live-transmit (see systemd/srt-bridge.service), which
+        # is a plain listener with a single destination and needs no streamid at all.
+        # Set SRT_STREAMID=publish:<path> only if you ever point this back at mediamtx.
+        SRT_URI="srt://${PUBLISH_HOST}:${PUBLISH_PORT}?latency=${LATENCY}"
+        [ -n "$SRT_STREAMID" ] && SRT_URI="${SRT_URI}&streamid=${SRT_STREAMID}"
+        SINK="mpegtsmux ! srtsink uri=${SRT_URI} sync=false" ;;
   *)    echo "PROTO must be rtmp or srt (got '$PROTO')" >&2; exit 1 ;;
 esac
 
