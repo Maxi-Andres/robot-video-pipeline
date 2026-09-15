@@ -26,11 +26,32 @@ EnvironmentFile=-/home/unitree/robot-video-pipeline/robot/video.env
 ExecStart=/home/unitree/robot-video-pipeline/robot/run-video.sh
 Restart=always
 RestartSec=5
-# Video encode is hardware-accelerated, so this stays cheap — but cap it anyway: nothing
-# on this machine may compete with the robot's control stack.
-MemoryMax=512M
-CPUQuota=50%
-Nice=10
+# Nothing on this machine may compete with the robot's control stack. That intent is right;
+# the way it was expressed was not, and it cost the drive view 77 ms per frame.
+#
+# It used to be `CPUQuota=50%` + `Nice=10`, written when the premise on the next line held:
+# "video encode is hardware-accelerated, so this stays cheap". It did — while the whole
+# pipeline was hardware (nvjpegdec -> nvvidconv -> nvv4l2h264enc). Then the MJPEG branch got a
+# resize in OpenCV, which is CPU, and the quota that used to be slack became a vice.
+#
+# CPUQuota is an ABSOLUTE ceiling: CFS freezes every task in the cgroup the moment it is
+# spent, even on an idle machine, until the next 100 ms period — a stall that shows up in no
+# lock and no profiler. And the cgroup is shared: run-video.sh launches go2_jpeg_stream,
+# mjpeg_server.py and gst-launch as ONE pipeline, so they spend one budget between them.
+# Measured 2026-09-16 before the change: nr_throttled 14059 of 30418 periods — 46% of this
+# pipeline's CPU periods ended frozen — and the MJPEG resize cost 105 ms against 28 ms of
+# actual work. After: throttling stops dead and the cost is 29.4 ms, max 34.5 (was 194).
+#
+# CPUWeight is RELATIVE: it only bites under real contention, which is what "must not compete"
+# actually means. 50 against the default 100 leaves this at half the priority of anything else
+# when the machine is busy, and costs nothing when it is not. The control stack does not
+# depend on this limit anyway — robot-telemetry-agent and robot-command-relay carry their own.
+#
+# MemoryMax is 1G, not 512M: the cgroup holds three processes today and a fourth is planned
+# (a persistent gst-launch doing the MJPEG resize on the NVJPG engines). Current use is 158 MB.
+# An OOM kill here takes down the whole video, live view included.
+MemoryMax=1G
+CPUWeight=50
 
 [Install]
 WantedBy=multi-user.target

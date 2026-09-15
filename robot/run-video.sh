@@ -113,6 +113,11 @@ MJPEG_ENABLE="${MJPEG_ENABLE:-1}"
 export MJPEG_PORT="${MJPEG_PORT:-8093}"
 export MJPEG_BIND="${MJPEG_BIND:-0.0.0.0}"
 export MJPEG_FPS="${MJPEG_FPS:-0}"
+# These two used to have no default and no export: they reached mjpeg_server only because
+# systemd loads video.env for the whole service and children inherit it. Run this script by
+# hand, outside systemd, and the live view silently went back to full resolution.
+export MJPEG_WIDTH="${MJPEG_WIDTH:-0}"
+export MJPEG_QUALITY="${MJPEG_QUALITY:-75}"
 
 # Scaling happens on the GPU (nvvidconv), so it costs the encoder less work AND less
 # bitrate for the same quality — a real latency knob, not just a bandwidth one.
