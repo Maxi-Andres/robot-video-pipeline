@@ -175,18 +175,36 @@ class _HwResizer:
 
     # -- child lifecycle ---------------------------------------------------------------
     def _stop(self):
+        """Shut the child down GENTLY first. This is not politeness, it is a leak fix.
+
+        The NV elements hold NVMM buffer pools, which live in nvmap — a pool that is separate
+        from system RAM and invisible to `free`. Killed with SIGKILL they never release them,
+        and NVMM does not come back until reboot. Observed 2026-09-16: three quality changes in
+        a row, each rebuilding the child, and the fourth start died with
+        `PosixMemMap:84 mmap failed : Cannot allocate memory` on a machine with 12 GB free.
+
+        Closing stdin makes fdsrc emit EOS, which walks the pipeline down and frees the pools.
+        SIGKILL stays as the last resort for a child that is genuinely wedged — the case the
+        read/write deadlines exist to catch.
+        """
         proc, self._proc, self._key = self._proc, None, None
         if proc is None:
             return
-        for step in (proc.kill,):
-            try:
-                step()
-            except Exception:
-                pass
         try:
-            proc.wait(timeout=2)
+            proc.stdin.close()          # -> EOS -> clean teardown -> NVMM released
         except Exception:
             pass
+        for step, wait in ((None, 1.5), (proc.terminate, 1.0), (proc.kill, 1.0)):
+            if step is not None:
+                try:
+                    step()
+                except Exception:
+                    pass
+            try:
+                proc.wait(timeout=wait)
+                break
+            except Exception:  # noqa: S112  # still alive: fall through to the harder signal
+                continue
         # Close every fd explicitly. WIDTH can be moved from the panel, and each move rebuilds
         # the child: leaking three fds a time turns an afternoon of tuning into EMFILE.
         for handle in (proc.stdin, proc.stdout, proc.stderr):
