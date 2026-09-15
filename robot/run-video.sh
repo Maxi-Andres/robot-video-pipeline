@@ -67,8 +67,26 @@ cd "$(dirname "$0")/.."
 #   per frame  | 0.30 Mbit            | 0.145 Mbit   (half)
 #   Jetson     | JPEG decode + encode | nothing, it is a passthrough
 #
-# The reason to care is not the bitrate, it is that `multicast` never asks the videohub for
-# anything — and the videohub is ~650 ms of the glass-to-glass, about 90% of it.
+# The reason to care is the frames, the bandwidth per frame, and the Jetson's load. It is NOT
+# latency: measured the same day by two independent methods, `multicast` and `jpeg` have the
+# SAME glass-to-glass. The "videohub is ~650 ms, about 90% of it" line that used to sit here
+# was wrong twice over — that number came from comparing against a clock that was not ours
+# (the same method produced -710 ms and -1400 ms, both impossible), and skipping the videohub
+# entirely changed nothing. There is latency upstream of both paths and it is UNMEASURED.
+#
+# WHAT `multicast` COSTS YOU ON A FIELD LINK, and it is not NAT. The multicast never leaves
+# the robot: udpsrc joins the group on $NIC, which is the robot's own internal bus, and what
+# crosses LTE/Starlink is the same unicast RTMP over TCP as always. But the ENCODER is now
+# Unitree's, inside the robot, and it has no knob we can reach:
+#
+#   BITRATE / NVR_FPS / MAXFPS / IDR_FRAMES apply to `jpeg` ONLY.  On `multicast` they are
+#   silently inert -- see the ENC_BITRATE=0 branch below.
+#
+# So on `multicast` you cannot turn the video down, and it sends MORE: 1.78 Mbps against 1.43,
+# and 14.25 fps against 4.5. On a lossy link that matters, because the freezing on this system
+# is loss with TCP retransmission and sending less loses less. If a field link starts freezing,
+# the move is `SOURCE=jpeg`, where the knobs exist. Nothing was deleted to make room for
+# `multicast`, precisely so that fallback stays one variable away.
 #
 # NOT the DDS topic rt/frontvideostream. That one is a dead end: it exists and a subscriber
 # MATCHES its publisher, but no sample is ever delivered — reproduced from INSIDE the Jetson,
