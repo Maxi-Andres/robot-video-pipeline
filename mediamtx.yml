@@ -34,19 +34,6 @@ srt: yes
 srtAddress: :8890   # enabled but UNUSABLE from the robot: its libsrt 1.4.0 is incompatible
                     # with mediamtx SRT. The robot publishes over RTMP instead. See
                     # robot/run-video.sh for the bisect that proved it.
-# How many packets mediamtx may queue PER READER before it starts discarding. The default
-# is 512, and that default is why a reader here was 2.5 s behind while a browser on WebRTC
-# from the SAME stream was 0.2 s: at 1.78 Mbps with ~1200-byte payloads the stream is about
-# 185 packets/s, so 512 packets IS ~2.8 s of video. The queue fills once and stays full, and
-# a reader consuming at real time never drains it -- the lag is constant from the very first
-# frame, which is exactly what was measured (38.109 -> clock 35.6, and identical 10 s later).
-#
-# 32 packets is ~0.17 s, below one frame interval at 14 fps. The trade is that a reader that
-# genuinely stalls gets frames DISCARDED instead of queued, which for a drive view is the
-# right way round: a dropped frame costs freshness once, a queued one costs latency forever.
-# Must be a power of two -- mediamtx refuses to start otherwise.
-writeQueueSize: 32
-
 api: no
 metrics: no
 pprof: no
