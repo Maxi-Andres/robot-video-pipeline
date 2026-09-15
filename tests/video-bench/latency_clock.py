@@ -323,6 +323,46 @@ def serve(port, bind):
 FFMPEG_DEFAULT = "rtsp_transport;tcp|fflags;nobuffer|flags;low_delay|stimeout;5000000"
 
 
+def read_mjpeg(name, url, seconds, roi):
+    """Read an MJPEG-over-HTTP stream by scanning for JPEG markers, with NO FFmpeg.
+
+    This is not a detail. Measured 2026-09-15, OpenCV's FFmpeg-backed reader hands over
+    frames that are 2.4 s old on this system while a browser on the same stream is at 0.2 s,
+    and no demuxer option changes it. So measuring an MJPEG branch THROUGH FFmpeg would
+    charge it for a defect that belongs to the reader, not the branch. This scanner is the
+    same shape the bridge's HttpStreamSource uses, which is what makes the number comparable
+    to what the drive view actually gets.
+    """
+    import cv2
+    out = []
+    req = urllib.request.Request(url, headers={"User-Agent": "latency-clock"})
+    t_end = time.monotonic() + seconds
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        buf = b""
+        while time.monotonic() < t_end:
+            chunk = resp.read1(65536)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                i = buf.find(b"\xff\xd8")
+                if i < 0:
+                    break
+                j = buf.find(b"\xff\xd9", i + 2)
+                if j < 0:
+                    break
+                jpg, buf = buf[i:j + 2], buf[j + 2:]
+                t = time.time() * 1000.0
+                g = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE)
+                if g is None:
+                    continue
+                if roi:
+                    x, y, w, h = roi
+                    g = g[y:y + h, x:x + w]
+                out.append((t, float(np.mean(g))))
+    return out
+
+
 def read_frames(name, url, seconds, roi, ffmpeg_opts=None):
     """Capture (arrival_epoch_ms, mean_brightness) for `seconds`.
 
@@ -456,7 +496,15 @@ def measure(args):
 
     def run(name, url):
         try:
-            results[name] = read_frames(name, url, args.seconds, roi, args.ffmpeg_opts)
+            # An http(s) URL is served as MJPEG here, and it is read WITHOUT FFmpeg on
+            # purpose -- see read_mjpeg. Force the FFmpeg path with ffmpeg+http://... when
+            # you specifically want to measure what FFmpeg costs.
+            if url.startswith("ffmpeg+"):
+                results[name] = read_frames(name, url[7:], args.seconds, roi, args.ffmpeg_opts)
+            elif url.startswith(("http://", "https://")):
+                results[name] = read_mjpeg(name, url, args.seconds, roi)
+            else:
+                results[name] = read_frames(name, url, args.seconds, roi, args.ffmpeg_opts)
         except Exception as exc:
             results[name] = exc
 
