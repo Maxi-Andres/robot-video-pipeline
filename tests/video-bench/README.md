@@ -42,11 +42,13 @@ loss, so this half runs in a page.
 
 ```bash
 python3 synthetic_source.py --serve-only --port 8099 --pagedir . &
-firefox 'http://127.0.0.1:8099/?whep=http://127.0.0.1:8889/robot/whep&mjpeg=off&barcode=0'
+firefox 'http://127.0.0.1:8099/?whep=https://127.0.0.1:8889/robot/whep&mjpeg=off&barcode=0'
 grep '"rtc":' report.jsonl | python3 show.py
 ```
 
-`barcode=0` because real camera frames carry none; `mjpeg=off` because the robot's `:8093`
+**https**, not http: mediamtx runs with `webrtcEncryption: yes`, and a plain HTTP POST to
+:8889 answers `400 Bad Request` without saying why — measured 2026-09-16, and this line
+said `http://` until then. `barcode=0` because real camera frames carry none; `mjpeg=off` because the robot's `:8093`
 sends no CORS header, so the page cannot read it cross-origin — that branch is `field_probe`'s
 job. The page posts a window of statistics every 30 s to `report.jsonl`.
 
