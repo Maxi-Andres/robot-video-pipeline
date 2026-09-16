@@ -81,7 +81,17 @@ def main():
     nbytes, n, unstamped = 0, 0, 0
     t_end = time.time() + secs
     while time.time() < t_end:
-        chunk = r.read(65536)
+        # read1(), NOT read(): read(n) on a buffered HTTP body blocks until it has ALL n
+        # bytes, so with 6 KB frames this waited for ~11 of them before returning any — and
+        # then reported the wait as TRANSPORT. MEASURED 2026-09-16, same stream, same
+        # minute, only this call changed: read(65536) said 436 ms p50 with an arrival
+        # cadence of 0 ms (the giveaway: frames arriving in bursts is a reader filling its
+        # own buffer, not a link), while a read1() reader measured the same stream at 89 ms.
+        #
+        # THIRD COPY OF THIS SCANNER, and the second one to carry this exact bug. The others
+        # are mjpeg_server.pump() on the robot and HttpStreamSource in the camera bridge,
+        # and both document it. If you touch one, check the other two.
+        chunk = r.read1(65536)
         if not chunk:
             break
         buf += chunk

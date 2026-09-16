@@ -234,11 +234,21 @@ fi
 #
 # config-interval=-1 so SPS/PPS ride with every keyframe: a viewer joining mid-stream otherwise
 # gets "non-existing PPS" and never decodes a frame. It matters on BOTH sources.
+#
+# num-B-Frames=0 is set EXPLICITLY, not left to the default, and this is the constraint that
+# was not written down anywhere: mediamtx closes a WebRTC session the moment it sees them —
+# "WebRTC doesn't support H264 streams with B-frames" — so a stream that grows B-frames has
+# no live view at all. gst-inspect on this robot says the default is already 0 and the
+# profile is Baseline, which cannot carry them; the encoder emitted them anyway on
+# 2026-09-16 after a change of resolution, fps, keyframe interval and bitrate, and mediamtx
+# killed the sessions for ~30 s each time. Which of the four did it was never determined, so
+# the property is pinned rather than trusted. It costs nothing on a stream that had none.
 case "$SOURCE" in
   jpeg)
     HEAD="fdsrc fd=0 do-timestamp=true ! jpegparse ! nvjpegdec ! nvvidconv $SCALE\
       ! nvv4l2h264enc bitrate=$ENC_BITRATE control-rate=$CONTROL_RATE \
         insert-sps-pps=1 idrinterval=$IDR_FRAMES iframeinterval=$IDR_FRAMES maxperf-enable=1 \
+        num-B-Frames=0 \
       ! h264parse config-interval=-1" ;;
   multicast)
     HEAD="udpsrc address=$MCAST_ADDR port=$MCAST_PORT multicast-iface=$NIC \
