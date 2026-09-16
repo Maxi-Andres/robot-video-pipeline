@@ -42,4 +42,18 @@ paths:
   # ffmpeg publishes to rtsp://127.0.0.1:8554/robot; NVR / VLC / browser read the
   # same path. source: publisher = the stream is pushed to us (not pulled by us).
   robot:
-    source: publisher
+    # SRT, not RTMP. The robot's libsrt 1.4.0 cannot handshake with mediamtx directly (see
+    # srtAddress above), so `srt-bridge` on this machine listens on :8891, terminates the SRT
+    # session and forwards the MPEG-TS here over loopback — where nothing can be lost.
+    #
+    # WHY SRT AT ALL: measured over LTE 2026-09-16, RTMP-over-TCP is the wrong transport for a
+    # lossy link. Every lost packet costs a retransmission round trip (200-380 ms there) AND
+    # blocks everything queued behind it, because TCP delivers in order. Sending MORE frames
+    # delivered FEWER: a 15 fps cap arrived as 1.90 fps where a 5 fps cap arrived as 3.85.
+    # SRT recovers whatever fits inside its latency budget (150 ms, set on the bridge) and
+    # DISCARDS the rest instead of stalling — freshness over completeness, which is what a
+    # drive view wants.
+    #
+    # To go back to RTMP: `source: publisher` here, and PROTO=rtmp on the robot. Both ends
+    # must agree — this path can only have one kind of source at a time.
+    source: udp+mpegts://127.0.0.1:9000
