@@ -650,7 +650,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         LATEST.clients += 1
         seq = -1
-        last = 0.0
+        gate = RateGate()
         try:
             while True:
                 jpeg, seq, _ = LATEST.get_newer_than(seq, timeout=10.0)
@@ -660,12 +660,9 @@ class Handler(BaseHTTPRequestHandler):
                 # connected, which meant a live change reached nobody: the camera bridge
                 # holds one connection open for hours, so the operator would move the
                 # control and the stream it actually feeds would never notice.
-                min_gap = (1.0 / FPS) if FPS > 0 else 0.0
-                if min_gap:
-                    now = time.monotonic()
-                    if now - last < min_gap:
-                        continue                  # honour the cap by DROPPING, not delaying
-                    last = now
+                if not gate.allows(time.monotonic(),
+                                   (1.0 / FPS) if FPS > 0 else 0.0):
+                    continue                      # honour the cap by DROPPING, not delaying
                 self.wfile.write(
                     b"--" + BOUNDARY.encode() + b"\r\n"
                     b"Content-Type: image/jpeg\r\n"
@@ -675,6 +672,59 @@ class Handler(BaseHTTPRequestHandler):
             pass                                   # viewer went away; normal
         finally:
             LATEST.clients -= 1
+
+
+class RateGate:
+    """A frames-per-second cap that delivers the rate it was ASKED for.
+
+    THE DEFECT THIS REPLACES, measured on the robot 2026-09-16: the old gate compared against
+    the arrival time of the last frame it accepted —
+
+        if now - last < min_gap: continue
+        last = now
+
+    — which can only ever deliver `source / k` for whole k, because frames arrive at the
+    camera's cadence and nothing lands exactly on the deadline. With the camera at 14.3 fps
+    (70 ms apart) and a cap of 10 (100 ms), the frame at 70 ms is "early" and dropped, the
+    next lands at 140, and the stream settles at **7.13 fps** — measured, against a cap that
+    said 10. The only reachable rates were 14.3, 7.15, 4.77, 3.58…, so EVERY cap between 7.2
+    and 14.2 delivered exactly 7.15.
+
+    THE FIX is to advance a deadline by exactly one period per frame SENT, rather than
+    anchoring it on when a frame happened to arrive. The deadline then carries the remainder
+    forward, so the gate can take two frames out of three and average the rate it was given.
+
+    The clamp is the other half and it is not decoration: if the source stalls, the deadline
+    falls into the past, and without the clamp the gate would pass every frame back-to-back
+    until it caught up — a burst of stale pictures on the view the operator steers by, which
+    is exactly the failure `Latest` exists to prevent one layer up.
+
+    Per viewer, because the cap is per viewer: `self` holds one deadline and each HTTP client
+    gets its own instance.
+    """
+
+    __slots__ = ("_due",)
+
+    def __init__(self):
+        self._due = 0.0     # monotonic deadline; 0.0 = not seeded yet
+
+    def allows(self, now, min_gap):
+        """True if a frame arriving at `now` may be sent under a cap of `min_gap` seconds."""
+        if min_gap <= 0:
+            self._due = 0.0     # no cap; re-seed if one is turned back on
+            return True
+        if not self._due:
+            self._due = now     # first frame of this viewer sets the phase
+        if now < self._due:
+            return False
+        self._due += min_gap
+        if self._due < now:
+            # The source stalled and the deadline fell into the past. Resync a FULL period
+            # ahead, not to `now`: setting it to `now` lets the very next frame through
+            # 70 ms later, which is the burst this clamp exists to stop. Caught by
+            # test_a_stall_does_not_release_a_burst, which failed on exactly that.
+            self._due = now + min_gap
+        return True
 
 
 PUBLISH = None      # set in main(): RAW.put when resizing, LATEST.put when not
