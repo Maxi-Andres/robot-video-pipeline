@@ -743,22 +743,37 @@ PUBLISH = None      # set in main(): RAW.put when resizing, LATEST.put when not
 NVR_ENABLE = os.environ.get("NVR_ENABLE", "1") != "0"
 NVR_FPS = float(os.environ.get("NVR_FPS", "5"))
 NVR_MAX = int(os.environ.get("NVR_QUEUE", "8"))
-_nvr_last = 0.0
+_nvr_gate = RateGate()
 _nvr = collections.deque()
 _nvr_cv = threading.Condition()
 _nvr_dropped = 0
 
 
 def nvr_offer(frame):
-    """Offer a frame to the recording branch at a steady rate. Never blocks the caller."""
-    global _nvr_dropped, _nvr_last
+    """Offer a frame to the recording branch at a steady rate. Never blocks the caller.
+
+    Uses the SAME gate as the live view, and it has to: this one used to compare against the
+    arrival time of the last accepted frame, which costs whole frames as soon as the cap sits
+    anywhere near the source rate.
+
+    MEASURED 2026-09-21, and this one hid behind the link for days. `NVR_FPS=15` puts the
+    minimum gap at 66.7 ms against a camera delivering every 70 ms — close enough that normal
+    cadence jitter pushes frames under the threshold, each costing the one after it too. The
+    camera fed 14.3 fps, the queue dropped NOTHING, SRT reported ZERO loss, and 8.7 fps came
+    out the far end. With `NVR_FPS=20` (a 50 ms gap, comfortably clear of 70) the same
+    pipeline delivered 14.2.
+
+    That is also why this variable is treacherous: it is BOTH the gate's ceiling, which wants
+    to sit well above the source rate, AND the divisor that pre-computes the encoder's
+    per-frame bitrate (see run-video.sh), which wants to BE the source rate. Two jobs, opposite
+    optima. The deadline-based gate removes the conflict: a cap of 15 against a 14.3 fps
+    source now passes every frame, so the divisor can be honest.
+    """
+    global _nvr_dropped
     if not NVR_ENABLE:
         return
-    if NVR_FPS > 0:
-        now = time.monotonic()
-        if now - _nvr_last < 1.0 / NVR_FPS:
-            return                      # not this one: keeps the cadence regular
-        _nvr_last = now
+    if not _nvr_gate.allows(time.monotonic(), (1.0 / NVR_FPS) if NVR_FPS > 0 else 0.0):
+        return                          # not this one: keeps the cadence regular
     with _nvr_cv:
         while len(_nvr) >= NVR_MAX:
             _nvr.popleft()
