@@ -102,3 +102,45 @@ def test_the_gate_is_per_viewer():
     assert a.allows(1000.0, min_gap)
     assert not a.allows(1000.0 + SOURCE_PERIOD, min_gap)
     assert b.allows(1000.0 + SOURCE_PERIOD, min_gap)      # b is new: its first frame passes
+
+
+# --------------------------------------------------------------------------- #
+# The recording branch uses the same gate, and its defect hid behind the link.
+# --------------------------------------------------------------------------- #
+def _feed_nvr(monkeypatch, nvr_fps, source_fps, seconds):
+    """Drive `nvr_offer` with synthetic time and count what reaches the queue."""
+    import collections
+
+    clock = [1000.0]
+    monkeypatch.setattr(mjpeg_server.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mjpeg_server, "NVR_FPS", float(nvr_fps))
+    monkeypatch.setattr(mjpeg_server, "NVR_ENABLE", 1)
+    monkeypatch.setattr(mjpeg_server, "NVR_MAX", 10 ** 9)   # isolate the gate from the queue
+    monkeypatch.setattr(mjpeg_server, "_nvr_gate", mjpeg_server.RateGate())
+    monkeypatch.setattr(mjpeg_server, "_nvr", collections.deque())
+
+    period = 1.0 / source_fps
+    end = clock[0] + seconds
+    while clock[0] < end:
+        mjpeg_server.nvr_offer(b"frame")
+        clock[0] += period
+    return len(mjpeg_server._nvr) / seconds
+
+
+def test_the_recording_branch_keeps_every_frame_when_its_cap_is_above_the_source(monkeypatch):
+    """THE defect that hid behind the link for days.
+
+    `NVR_FPS=15` against a camera delivering 14.3 fps put the old gate's minimum gap (66.7 ms)
+    right next to the source period (70 ms): ordinary cadence jitter pushed frames under the
+    threshold and each one cost the frame after it too. MEASURED on the robot 2026-09-21 —
+    camera 14.3 fps, queue dropping NOTHING, SRT reporting ZERO loss, and 8.7 fps coming out
+    the far end. A cap ABOVE the source rate must throw away nothing at all.
+    """
+    got = _feed_nvr(monkeypatch, nvr_fps=15, source_fps=14.3, seconds=60)
+    assert abs(got - 14.3) <= 0.2, f"cap 15 over a 14.3 fps source delivered {got:.2f}"
+
+
+def test_the_recording_branch_honours_a_cap_below_the_source(monkeypatch):
+    """And it must still be a cap: an NVR asked for 5 fps gets 5, not 14.3/3."""
+    got = _feed_nvr(monkeypatch, nvr_fps=5, source_fps=14.3, seconds=60)
+    assert abs(got - 5.0) <= 0.3, f"cap 5 delivered {got:.2f}"
