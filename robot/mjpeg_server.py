@@ -129,6 +129,61 @@ def _jpeg_size(jpeg):
     return None, None
 
 
+def stop_child(proc, label):
+    """Shut a gst-launch child down GENTLY first. This is not politeness, it is a leak fix.
+
+    The NV elements hold NVMM buffer pools, which live in nvmap — a pool separate from system
+    RAM and invisible to `free`. Killed with SIGKILL they never release them, and NVMM does not
+    come back until reboot. Observed 2026-09-16: three quality changes in a row, each
+    rebuilding the child, and the fourth start died with
+    `PosixMemMap:84 mmap failed : Cannot allocate memory` on a machine with 12 GB free.
+
+    Closing stdin makes fdsrc emit EOS, which walks the pipeline down and frees the pools.
+    SIGKILL stays as the last resort for a child that is genuinely wedged — the case the
+    read/write deadlines exist to catch.
+
+    Module-level because there are now TWO of these children (the JPEG resizer and the H.264
+    drive branch) and they must not learn this the hard way twice.
+    """
+    if proc is None:
+        return
+    try:
+        proc.stdin.close()          # -> EOS -> clean teardown -> NVMM released
+    except Exception:
+        pass
+    for step, wait in ((None, 1.5), (proc.terminate, 1.0), (proc.kill, 1.0)):
+        if step is not None:
+            try:
+                step()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=wait)
+            break
+        except Exception:  # noqa: S112  # still alive: fall through to the harder signal
+            continue
+    # Close every fd explicitly. The size can be moved from the panel, and each move rebuilds
+    # the child: leaking three fds a time turns an afternoon of tuning into EMFILE.
+    for handle in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            handle and handle.close()
+        except Exception:
+            pass
+    log(f"{label}: child stopped")
+
+
+def drain_stderr(proc, label):
+    """Drain a child's stderr forever. gst-launch is chatty; an unread stderr pipe fills at
+    64 KB and then the child blocks writing to it, which looks exactly like a wedged encoder."""
+    try:
+        for line in iter(proc.stderr.readline, b""):
+            text = line.decode("utf-8", "replace").strip()
+            if text:
+                log(f"{label} child: {text}")
+    except Exception:
+        pass
+
+
 class _HwResizer:
     """Resize on the Jetson's JPEG hardware, through a persistent gst-launch child.
 
@@ -175,43 +230,8 @@ class _HwResizer:
 
     # -- child lifecycle ---------------------------------------------------------------
     def _stop(self):
-        """Shut the child down GENTLY first. This is not politeness, it is a leak fix.
-
-        The NV elements hold NVMM buffer pools, which live in nvmap — a pool that is separate
-        from system RAM and invisible to `free`. Killed with SIGKILL they never release them,
-        and NVMM does not come back until reboot. Observed 2026-09-16: three quality changes in
-        a row, each rebuilding the child, and the fourth start died with
-        `PosixMemMap:84 mmap failed : Cannot allocate memory` on a machine with 12 GB free.
-
-        Closing stdin makes fdsrc emit EOS, which walks the pipeline down and frees the pools.
-        SIGKILL stays as the last resort for a child that is genuinely wedged — the case the
-        read/write deadlines exist to catch.
-        """
         proc, self._proc, self._key = self._proc, None, None
-        if proc is None:
-            return
-        try:
-            proc.stdin.close()          # -> EOS -> clean teardown -> NVMM released
-        except Exception:
-            pass
-        for step, wait in ((None, 1.5), (proc.terminate, 1.0), (proc.kill, 1.0)):
-            if step is not None:
-                try:
-                    step()
-                except Exception:
-                    pass
-            try:
-                proc.wait(timeout=wait)
-                break
-            except Exception:  # noqa: S112  # still alive: fall through to the harder signal
-                continue
-        # Close every fd explicitly. WIDTH can be moved from the panel, and each move rebuilds
-        # the child: leaking three fds a time turns an afternoon of tuning into EMFILE.
-        for handle in (proc.stdin, proc.stdout, proc.stderr):
-            try:
-                handle and handle.close()
-            except Exception:
-                pass
+        stop_child(proc, "hw resize")
 
     def _start(self, width, quality, src_w, src_h):
         height = max(2, round(src_h * width / float(src_w)) & ~1)
@@ -225,18 +245,10 @@ class _HwResizer:
         self._first = True
         # Drain stderr forever. gst-launch is chatty; an unread stderr pipe fills at 64 KB and
         # then the child blocks writing to it, which looks exactly like a wedged encoder.
-        threading.Thread(target=self._drain_stderr, args=(self._proc,), daemon=True).start()
+        threading.Thread(target=drain_stderr, args=(self._proc, "hw resize"),
+                         daemon=True).start()
         log(f"hw resize: {src_w}x{src_h} -> {width}x{height} "
             f"q{quality} (pid {self._proc.pid})")
-
-    def _drain_stderr(self, proc):
-        try:
-            for line in iter(proc.stderr.readline, b""):
-                text = line.decode("utf-8", "replace").strip()
-                if text:
-                    log(f"hw resize child: {text}")
-        except Exception:
-            pass
 
     # -- the frame path ----------------------------------------------------------------
     def shrink(self, jpeg, width, quality):
@@ -381,6 +393,23 @@ def log(msg):
 # Set STAMP=1 to enable. Read it downstream with read_stamp().
 # --------------------------------------------------------------------------- #
 STAMP = os.environ.get("STAMP", "0") == "1"
+
+# ---------------------------------------------------------------------------------------
+# THE DRIVE BRANCH: all-intra H.264, half the bytes of the JPEG at the same quality.
+#
+# OFF BY DEFAULT. It costs a second hardware encode, and nothing consumes it until the
+# browser side lands — see PLAN-VIDEO.md 6.g C/D. Turning it on changes nothing for the
+# MJPEG or the NVR: it is a third reader of RAW, gated on its own.
+#
+# MEASURED 2026-09-21 on this robot, against the uncompressed original: at PSNR 29.34 dB an
+# all-intra frame costs 4151 B where the JPEG at 29.30 dB costs 8663. QP 40 is that point;
+# QP 32 lands at the JPEG's size with ~1 dB more quality.
+# ---------------------------------------------------------------------------------------
+H264_ENABLE = os.environ.get("H264_ENABLE", "0") == "1"
+H264_WIDTH = int(os.environ.get("H264_WIDTH", "480") or 480)
+H264_HEIGHT = int(os.environ.get("H264_HEIGHT", "270") or 270)
+H264_QP = int(os.environ.get("H264_QP", "40") or 40)
+H264_FPS = float(os.environ.get("H264_FPS", "0") or 0.0)   # 0 = every frame
 _SOI = b"\xff\xd8"
 _COM = b"\xff\xfe"
 _TAG = b"AVL1 "
@@ -433,6 +462,12 @@ LIVE_PARAMS = {
     # The hardware resize, on/off from the relay. This is the cheapest possible rollback for
     # the riskiest part of the live path: no SSH, no restart, no redeploy.
     "hw":      ("HW", int, 0, 1),
+    # The drive branch, live. Same reasoning as `hw`: the rollback for a new path must not
+    # need SSH. `h264_qp` is the quality/size dial — lower is better and bigger.
+    "h264":       ("H264_ENABLE", int, 0, 1),
+    "h264_qp":    ("H264_QP", int, 10, 51),
+    "h264_width": ("H264_WIDTH", int, 64, 1920),
+    "h264_fps":   ("H264_FPS", float, 0.0, 60.0),
 }
 
 
@@ -502,6 +537,9 @@ class Latest:
 # because every cycle waited for a 1080p decode before reading the next frame.
 RAW = Latest()
 LATEST = Latest()
+# The drive branch's own slot. Third reader of RAW, independent of the other two: the whole
+# point of the second encode is that the NVR and the drive view stop competing for one.
+H264 = Latest()
 
 
 # WAIT vs WORK, and why both are needed. `t_out - t_in` — the number field_probe reports — is
@@ -525,6 +563,188 @@ def _p50(samples):
         return None
     ordered = sorted(samples)
     return round(ordered[len(ordered) // 2], 1)
+
+
+class AuReader:
+    """Frames `multipartmux` output into access units, one per `feed()`-able chunk.
+
+    WHY MULTIPART AND NOT RAW ANNEX-B. The encoder's byte stream carries no lengths, so the
+    only way to know an access unit ended is to see the NEXT one begin — a full frame of
+    lookahead, ~70 ms at the camera's cadence, on the one path whose entire purpose is being
+    fast. `multipartmux` writes an explicit `Content-Length` per frame for ~80 bytes of
+    overhead, measured on the robot 2026-09-21 (380857 bytes for the same 90 frames that are
+    373657 raw). The lookahead disappears.
+
+    Boundary-agnostic on purpose: it scans for the length header rather than a boundary
+    string, so it does not care what `multipartmux` calls its separator. Same reasoning as
+    the SOI/EOI scanner in `pump()`.
+    """
+
+    # A 480x270 access unit is a few kB. The cap is what keeps a wedged or desynchronised
+    # child from growing this buffer without bound — the defect the JPEG scanners in this
+    # repo were audited for.
+    _MAX_PART = 4 << 20
+
+    def __init__(self):
+        self._buf = b""
+
+    def feed(self, chunk):
+        """Add bytes; return a list of complete access units (usually 0 or 1)."""
+        self._buf += chunk
+        out = []
+        while True:
+            head = self._buf.find(b"Content-Length:")
+            if head < 0:
+                if len(self._buf) > self._MAX_PART:
+                    self._buf = b""         # no header in sight: desynchronised, resync
+                break
+            eol = self._buf.find(b"\r\n", head)
+            if eol < 0:
+                break
+            try:
+                n = int(self._buf[head + 15:eol])
+            except ValueError:
+                self._buf = self._buf[eol + 2:]
+                continue
+            body = self._buf.find(b"\r\n\r\n", eol)
+            if body < 0:
+                break
+            start = body + 4
+            if n > self._MAX_PART:
+                self._buf = self._buf[start:]
+                continue
+            if len(self._buf) < start + n:
+                break                       # the part has not arrived in full yet
+            out.append(self._buf[start:start + n])
+            self._buf = self._buf[start + n:]
+        return out
+
+
+class H264Encoder:
+    """The second encode: all-intra H.264 at the live view's size, for the DRIVE branch.
+
+    WHY A SECOND ENCODE AT ALL, and it is the operator's idea (PLAN-VIDEO.md 6.g C): one
+    stream cannot serve two consumers with opposite needs. The NVR wants resolution and does
+    not mind waiting; the drive view wants to arrive now and does not need 1080p. Today that
+    tension is resolved by keeping MJPEG alive as the only branch without buffers.
+
+    MEASURED 2026-09-21, same original frame, same hardware resize, against the uncompressed
+    original: at INDISTINGUISHABLE quality (PSNR 29.34 vs 29.30 dB) an all-intra H.264 frame
+    costs **4151 bytes against the JPEG's 8663** — half. At equal size it is ~1 dB better.
+
+    ALL-INTRA, not a normal GOP, and that is the point: every frame stands alone, so a lost
+    packet costs ONE FRAME instead of freezing until the next IDR. That is the property that
+    lets this ride a transport with no retransmission and no jitter buffer — the same
+    resilience MJPEG has, at half the bytes. A normal GOP is three times cheaper still, and
+    that is what the NVR branch already uses; it is the wrong trade here.
+
+    Mirrors `_HwResizer`: a persistent gst-launch child, LOCKSTEP, one frame in flight.
+    Write one JPEG, read one access unit, never queue.
+    """
+
+    _MAX_FAILS = 3
+    _FIRST_TIMEOUT_MS = 2500
+
+    def __init__(self):
+        self._proc = None
+        self._key = None            # (width, height, qp, src_w, src_h) the child was built for
+        self._reader = AuReader()
+        self._lock = threading.Lock()
+        self._fails = 0
+        self._dead = False
+        self._first = True
+
+    def _spawn(self, width, height, qp, src_w, src_h):
+        caps = f"video/x-raw(memory:NVMM),width={width},height={height}"
+        cmd = ["gst-launch-1.0", "-q",
+               "fdsrc", "fd=0", "!", "jpegparse", "!", "nvjpegdec", "!", "nvvidconv", "!",
+               caps, "!",
+               "nvv4l2h264enc",
+               # Every frame a keyframe. idrinterval AND iframeinterval: the first makes them
+               # IDR (a decoder may start on any one), the second makes them intra at all.
+               "iframeinterval=1", "idrinterval=1",
+               # B-frames break WebRTC and buy nothing here; pinned, not trusted to default.
+               "num-B-Frames=0",
+               # Fixed QP instead of a bitrate target: the size then follows the SCENE, which
+               # is what makes the comparison against JPEG meaningful and what keeps quality
+               # steady when the picture gets busy. ratecontrol-enable=0 + preset-level=0 are
+               # what the property's own documentation requires for quant-i-frames to apply.
+               "ratecontrol-enable=0", "preset-level=0", f"quant-i-frames={qp}",
+               "insert-sps-pps=1", "!",
+               # config-interval=-1 so SPS/PPS ride with every frame: a viewer joining
+               # mid-stream otherwise never gets the parameter sets and decodes nothing.
+               "h264parse", "config-interval=-1", "!",
+               "multipartmux", "!", "fdsink", "fd=1"]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, bufsize=0)
+        threading.Thread(target=drain_stderr, args=(proc, "h264"), daemon=True).start()
+        self._proc, self._key, self._first = proc, (width, height, qp, src_w, src_h), True
+        self._reader = AuReader()
+        return proc
+
+    def encode(self, jpeg, width, height, qp):
+        """One JPEG in, one access unit out (or None if the hardware path is unusable)."""
+        if self._dead:
+            return None
+        src_w, src_h = _jpeg_size(jpeg)
+        if not src_w:
+            return None
+        with self._lock:
+            try:
+                key = (width, height, qp, src_w, src_h)
+                if self._proc is None or self._key != key or self._proc.poll() is not None:
+                    if self._proc is not None:
+                        stop_child(self._proc, "h264")
+                    self._spawn(*key)
+                proc = self._proc
+                proc.stdin.write(jpeg)
+                proc.stdin.flush()
+                budget = self._FIRST_TIMEOUT_MS if self._first else 800
+                deadline = time.monotonic() + budget / 1000.0
+                while time.monotonic() < deadline:
+                    if not select.select([proc.stdout], [], [], 0.05)[0]:
+                        continue
+                    parts = self._reader.feed(os.read(proc.stdout.fileno(), 65536))
+                    if parts:
+                        self._first = False
+                        self._fails = 0
+                        return parts[-1]        # newest, never a backlog
+                raise TimeoutError("the H.264 child produced no access unit in time")
+            except Exception as exc:
+                self._fails += 1
+                log(f"h264 branch failed ({self._fails}/{self._MAX_FAILS}): {exc}")
+                if self._proc is not None:
+                    stop_child(self._proc, "h264")
+                    self._proc = None
+                if self._fails >= self._MAX_FAILS:
+                    # Three in a row is a broken machine, not a hiccup, and retrying forever
+                    # would put a multi-hundred-ms timeout in front of every frame.
+                    self._dead = True
+                    log("h264 branch disabled for the life of this process")
+                return None
+
+
+_H264 = H264Encoder()
+
+
+def h264_worker():
+    """Encode the newest frame to all-intra H.264, forever.
+
+    Skipping intermediate frames is correct and deliberate — the drive view wants the latest
+    picture, never a backlog. Its own gate, independent of the NVR's: the two branches answer
+    to different consumers and must not be able to starve one another.
+    """
+    seq = -1
+    gate = RateGate()
+    while True:
+        jpeg, seq, t_in = RAW.get_newer_than(seq, timeout=5.0)
+        if jpeg is None or not H264_ENABLE:
+            continue
+        if not gate.allows(time.monotonic(), (1.0 / H264_FPS) if H264_FPS > 0 else 0.0):
+            continue
+        au = _H264.encode(jpeg, H264_WIDTH, H264_HEIGHT, H264_QP)
+        if au:
+            H264.put(au, t_in)
 
 
 def resizer():
@@ -562,6 +782,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/") or "/"
         if path in ("/", "/stream"):
             return self._stream()
+        if path == "/h264":
+            return self._h264_stream()
         if path == "/snapshot":
             return self._snapshot()
         if path == "/health":
@@ -580,11 +802,14 @@ class Handler(BaseHTTPRequestHandler):
                 # wait vs work: see the comment above resizer(). Both null until the first
                 # frame goes through a resize, which is correct — at WIDTH=0 there is none.
                 b'"resize_path":"%s","wait_ms_p50":%s,"work_ms_p50":%s,"hw_fallbacks":%d,'
+                b'"h264":%s,"h264_qp":%d,"h264_size":"%dx%d","h264_clients":%d,'
                 b'"now":%.6f}'
                 % (LATEST.clients, (b"%g" % FPS) if FPS > 0 else b"null", WIDTH, QUALITY,
                    len(_nvr), _nvr_dropped, b"true" if STAMP else b"false",
                    (_HW.path if WIDTH > 0 else "none").encode(),
                    _json_num(_p50(_WAIT_MS)), _json_num(_p50(_WORK_MS)), _HW.fallbacks,
+                   b"true" if H264_ENABLE else b"false", H264_QP,
+                   H264_WIDTH, H264_HEIGHT, H264.clients,
                    time.time())
             )
             self.send_response(200)
@@ -639,6 +864,54 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(jpeg)
+
+    def _h264_stream(self):
+        """The drive branch: all-intra H.264 access units, one per multipart part.
+
+        SAME SHAPE AS THE MJPEG STREAM ON PURPOSE. The consumer already exists for that
+        framing (the camera bridge reads it, and a browser can), so the only thing that
+        changes downstream is what is inside each part — which is the whole point: half the
+        bytes for the same picture, with every frame still independent.
+
+        Each part carries `X-Capture`, the robot clock at the instant the frame came off the
+        camera. The MJPEG branch splices the same number into a JPEG COM segment; H.264 has no
+        such free-form field that survives, so it rides in the part header instead. That is
+        what lets the far end measure true capture-to-glass latency without a shared clock
+        assumption — the method every latency number in PLAN-VIDEO.md rests on.
+        """
+        if not H264_ENABLE:
+            return self._json(503, {"ok": False,
+                                    "error": 'h264 branch is off; POST /config {"h264":1}'})
+        self.send_response(200)
+        self.send_header("Age", "0")
+        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Type",
+                         f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+        self.end_headers()
+        H264.clients += 1
+        seq = -1
+        gate = RateGate()
+        try:
+            while True:
+                au, seq, t_in = H264.get_newer_than(seq, timeout=10.0)
+                if au is None:
+                    continue                      # no new frame yet; keep the socket open
+                # Per-viewer cap, re-read every frame like the MJPEG one, and with the same
+                # gate: a cap that cannot deliver the rate it is given is worse than none.
+                if not gate.allows(time.monotonic(),
+                                   (1.0 / H264_FPS) if H264_FPS > 0 else 0.0):
+                    continue
+                self.wfile.write(
+                    b"--" + BOUNDARY.encode() + b"\r\n"
+                    b"Content-Type: video/x-h264\r\n"
+                    b"X-Capture: " + (b"%.6f" % t_in) + b"\r\n"
+                    b"Content-Length: " + str(len(au)).encode() + b"\r\n\r\n"
+                    + au + b"\r\n")
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass                                   # viewer went away; normal
+        finally:
+            H264.clients -= 1
 
     def _stream(self):
         self.send_response(200)
@@ -861,6 +1134,7 @@ def main():
     # hand-off (microseconds, against a 41 ms transport) and makes the knob actually work.
     PUBLISH = RAW.put
     threading.Thread(target=resizer, name="resizer", daemon=True).start()
+    threading.Thread(target=h264_worker, name="h264", daemon=True).start()
 
     threading.Thread(target=nvr_writer, name="nvr-writer", daemon=True).start()
     srv = ThreadingHTTPServer((BIND, PORT), Handler)
