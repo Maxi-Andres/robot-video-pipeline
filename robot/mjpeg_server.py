@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 PORT = int(os.environ.get("MJPEG_PORT", "8093"))
 BIND = os.environ.get("MJPEG_BIND", "0.0.0.0")  # noqa: S104  # known finding P0-1: binds broadly, no auth yet
@@ -620,6 +621,120 @@ class AuReader:
         return out
 
 
+# ---------------------------------------------------------------------------------------
+# THE DRIVE BRANCH OVER UDP — why it exists.
+#
+# Over TCP one lost packet freezes the WHOLE stream until it is retransmitted, and the
+# retransmission waits at least the RTO. MEASURED 2026-09-23 over Starlink (3.4-4% loss, in
+# bursts at the 15 s satellite handovers): 10 stalls of 250-916 ms in 150 s on /h264, every
+# one of them on the link and none at the source; the socket showed `rto:252`, 4492
+# retransmissions, and BBR is not in this kernel. The frames are all-intra, so a frame that
+# does not arrive costs ONE frame and nothing else — which is only true if nothing waits for
+# it. UDP is what stops the waiting.
+#
+# MEASURED the same day with this exact datagram size and cadence (7 x 1200 B every 70 ms,
+# 60 s): 89.8% of frames arrived whole, 4.4% more were missing exactly one datagram (what one
+# XOR parity per group recovers), and the rest were lost in runs of 1-4 frames — at most
+# ~280 ms, against up to 916 ms of freeze on TCP.
+#
+# THE LEASE. A client opens `GET /h264?udp=PORT` over TCP and keeps it open; while it is open
+# this process sends the access units as datagrams to THE TCP PEER'S OWN ADDRESS on that port.
+# Three properties follow from that one choice:
+#   * no reflection: the destination is an address that completed a TCP handshake with us,
+#     so this cannot be pointed at a third party. What it receives is exactly what it could
+#     already read from /h264.
+#   * no viewer, no bytes: the lease closing — or TCP_USER_TIMEOUT firing when the peer
+#     vanishes without a FIN — stops the datagrams, same as the TCP branch.
+#   * a health channel for free: one heartbeat line a second carries how many frames were
+#     sent, so the far end can tell "UDP is blocked" from "the encoder is idle".
+#
+# WIRE FORMAT, little-endian, one header per datagram (UDP_HEADER, 32 bytes):
+#   magic "AV" | version u8 | kind u8 (0 data, 1 parity) | group u8 | pad | payload u16
+#   | session u32 | frame u32 | index u16 | count u16 | au_len u32 | capture f64
+# `index` is the fragment number for data and the group number for parity; `count` is always
+# the number of DATA fragments; `payload` is the sender's fragment size, so the receiver can
+# size a recovered fragment without guessing.
+#
+# SECOND COPY, ON PURPOSE: the receiver is `h264_relay.UdpReassembler` in
+# unitree_ros2/robot_camera_bridge. The network boundary forbids sharing a module, so both
+# tests assert the SAME golden datagrams (`tests/test_h264_udp.py` on each side). If you
+# change a field here, change it there and update both vectors.
+# ---------------------------------------------------------------------------------------
+UDP_MAGIC = b"AV"
+UDP_VERSION = 1
+UDP_HEADER = struct.Struct("<2sBBBxHIIHHId")
+# 1200 B of payload + 32 of header + 28 of IP/UDP = 1260, under the path's 1408 (the TCP MSS
+# measured on this link is 1368, so there is a tunnel in the way). Fragmenting at the IP layer
+# instead would turn ONE lost fragment into a lost datagram with no way to recover it.
+UDP_PAYLOAD = 1200
+# One parity per 8 data fragments: +12.5% bytes. A 480x270 frame at QP 40 is ~7.6 kB, i.e.
+# 7 fragments, so in practice one parity per frame — which is what was measured above.
+UDP_GROUP = 8
+# Bounded input: nothing this encoder produces is near it, and a frame this size would be
+# 870 datagrams of which one lost kills the lot. Refuse rather than flood the link.
+UDP_MAX_AU = 1 << 20
+UDP_KIND_DATA = 0
+UDP_KIND_PARITY = 1
+# socket.TCP_USER_TIMEOUT exists on Linux from Python 3.6, but not on every build; 18 is the
+# Linux value, and this file only ever runs on Linux.
+_TCP_USER_TIMEOUT = getattr(socket, "TCP_USER_TIMEOUT", 18)
+# Read by /health. Plain ints mutated from lease threads: a lost increment under the GIL would
+# skew a diagnostic counter, never a frame.
+_udp_stats = {"leases": 0, "send_drops": 0}
+
+
+def _xor(chunks, size):
+    """XOR of `chunks`, each zero-padded to `size`.
+
+    Through Python ints, not a per-byte loop: that loop is ~8000 interpreter steps a frame on
+    the Jetson, while int.from_bytes does the same work in C. Little-endian, so zero padding
+    at the END of a chunk is just high-order zeros.
+    """
+    acc = 0
+    for c in chunks:
+        acc ^= int.from_bytes(c, "little")
+    return acc.to_bytes(size, "little")
+
+
+def udp_packets(session, frame, au, capture, payload=UDP_PAYLOAD, group=UDP_GROUP):
+    """Split one access unit into datagrams: the data fragments, then one parity per group.
+
+    Returns [] for an empty or oversized access unit — nothing is sent rather than something
+    the receiver cannot use. Data goes first so a receiver can deliver the frame the moment
+    the last data fragment lands, without waiting for parity it does not need.
+    """
+    if not au or len(au) > UDP_MAX_AU:
+        return []
+    frags = [au[i:i + payload] for i in range(0, len(au), payload)]
+    count = len(frags)
+
+    def head(kind, index):
+        return UDP_HEADER.pack(UDP_MAGIC, UDP_VERSION, kind, group, payload,
+                               session & 0xFFFFFFFF, frame & 0xFFFFFFFF, index, count,
+                               len(au), capture)
+
+    out = [head(UDP_KIND_DATA, i) + f for i, f in enumerate(frags)]
+    for g in range(0, count, group):
+        members = frags[g:g + group]
+        out.append(head(UDP_KIND_PARITY, g // group)
+                   + _xor(members, max(len(m) for m in members)))
+    return out
+
+
+def udp_lease_port(query):
+    """The UDP port asked for in `/h264?udp=PORT`, or None when absent or not acceptable.
+
+    Fails SAFE: anything that is not a plain integer in 1024-65535 means "no UDP", and the
+    caller refuses the request instead of guessing a port.
+    """
+    values = parse_qs(query, keep_blank_values=True).get("udp")
+    # isascii() too: str.isdigit() is true for "²", which int() then rejects.
+    if not values or len(values) != 1 or not (values[0].isascii() and values[0].isdigit()):
+        return None
+    port = int(values[0])
+    return port if 1024 <= port <= 65535 else None
+
+
 class H264Encoder:
     """The second encode: all-intra H.264 at the live view's size, for the DRIVE branch.
 
@@ -779,10 +894,13 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        path = self.path.split("?")[0].rstrip("/") or "/"
+        path, _, query = self.path.partition("?")
+        path = path.rstrip("/") or "/"
         if path in ("/", "/stream"):
             return self._stream()
         if path == "/h264":
+            if "udp" in parse_qs(query, keep_blank_values=True):
+                return self._h264_udp_lease(udp_lease_port(query))
             return self._h264_stream()
         if path == "/snapshot":
             return self._snapshot()
@@ -803,6 +921,7 @@ class Handler(BaseHTTPRequestHandler):
                 # frame goes through a resize, which is correct — at WIDTH=0 there is none.
                 b'"resize_path":"%s","wait_ms_p50":%s,"work_ms_p50":%s,"hw_fallbacks":%d,'
                 b'"h264":%s,"h264_qp":%d,"h264_size":"%dx%d","h264_clients":%d,'
+                b'"h264_udp_leases":%d,"h264_udp_send_drops":%d,'
                 b'"now":%.6f}'
                 % (LATEST.clients, (b"%g" % FPS) if FPS > 0 else b"null", WIDTH, QUALITY,
                    len(_nvr), _nvr_dropped, b"true" if STAMP else b"false",
@@ -810,6 +929,7 @@ class Handler(BaseHTTPRequestHandler):
                    _json_num(_p50(_WAIT_MS)), _json_num(_p50(_WORK_MS)), _HW.fallbacks,
                    b"true" if H264_ENABLE else b"false", H264_QP,
                    H264_WIDTH, H264_HEIGHT, H264.clients,
+                   _udp_stats["leases"], _udp_stats["send_drops"],
                    time.time())
             )
             self.send_response(200)
@@ -912,6 +1032,92 @@ class Handler(BaseHTTPRequestHandler):
             pass                                   # viewer went away; normal
         finally:
             H264.clients -= 1
+
+    def _h264_udp_lease(self, port):
+        """The drive branch over UDP, for as long as this TCP request stays open.
+
+        See the block above `udp_packets()` for why, and for the wire format. The TCP body is
+        a heartbeat: one line a second with the number of frames sent so far, which is how
+        the far end tells a blocked UDP path (count rising, nothing arriving) from an idle
+        encoder (count flat). It is also what makes a vanished peer END the lease: the write
+        fails, or TCP_USER_TIMEOUT aborts it, and the datagrams stop.
+        """
+        if port is None:
+            return self._json(400, {"ok": False,
+                                    "error": "udp must be a port number in 1024-65535"})
+        if not H264_ENABLE:
+            return self._json(503, {"ok": False,
+                                    "error": 'h264 branch is off; POST /config {"h264":1}'})
+        peer = self.client_address[0]
+        session = struct.unpack("<I", os.urandom(4))[0]
+        try:
+            udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        except OSError as exc:
+            return self._json(500, {"ok": False, "error": f"udp socket: {exc}"})
+        try:
+            # connect() fixes the destination once, and lets an ICMP "port unreachable" come
+            # back as an error on a later send instead of vanishing.
+            udp.connect((peer, port))
+            # Never block the frame loop on the NIC: a full send buffer drops the rest of that
+            # frame (counted), exactly like a slow HTTP viewer skips frames.
+            udp.setblocking(False)
+            # A peer that disappears without a FIN would otherwise keep this lease — and the
+            # datagrams — alive until tcp_retries2 gives up, ~15 minutes. Ten seconds of
+            # unacknowledged heartbeat is plenty: the worst loss burst measured over Starlink
+            # froze TCP for under one.
+            self.connection.setsockopt(socket.IPPROTO_TCP, _TCP_USER_TIMEOUT, 10000)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Cache-Control", "no-cache, private")
+            self.send_header("Connection", "close")
+            self.send_header("X-Udp-Session", str(session))
+            self.send_header("X-Udp-Payload", str(UDP_PAYLOAD))
+            self.end_headers()
+            self.close_connection = True
+            log(f"h264 udp lease: {peer}:{port} session {session}")
+            _udp_stats["leases"] += 1
+            H264.clients += 1
+            try:
+                self._udp_loop(udp, session)
+            finally:
+                H264.clients -= 1
+                _udp_stats["leases"] -= 1
+                log(f"h264 udp lease ended: {peer}:{port}")
+        except OSError:
+            # The lease holder went away — a reset, a broken pipe, or TCP_USER_TIMEOUT
+            # (ETIMEDOUT) after it vanished without a FIN. All of them mean the same: stop.
+            pass
+        finally:
+            udp.close()
+
+    def _udp_loop(self, udp, session):
+        seq = -1
+        frame = 0
+        gate = RateGate()
+        next_beat = 0.0
+        while True:
+            now = time.monotonic()
+            if now >= next_beat:
+                self.wfile.write(b"%d\n" % frame)
+                self.wfile.flush()
+                next_beat = now + 1.0
+            au, seq, t_in = H264.get_newer_than(seq, timeout=1.0)
+            if au is None or not H264_ENABLE:
+                continue
+            if not gate.allows(time.monotonic(),
+                               (1.0 / H264_FPS) if H264_FPS > 0 else 0.0):
+                continue
+            frame += 1
+            for datagram in udp_packets(session, frame, au, t_in):
+                try:
+                    udp.send(datagram)
+                except OSError:
+                    # The rest of THIS frame is dropped, not queued: a frame missing its tail
+                    # is useless, and holding it would make the next one late. That covers a
+                    # full send buffer (BlockingIOError), an ICMP refusal from an earlier send
+                    # and a route that blinked. Whether the lease lives is the TCP side's call.
+                    _udp_stats["send_drops"] += 1
+                    break
 
     def _stream(self):
         self.send_response(200)
