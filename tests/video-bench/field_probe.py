@@ -53,16 +53,23 @@ def read_stamp(jpeg: bytes):
         return None
 
 
-def clock_offset(samples: int = 9) -> float:
-    """Robot clock minus ours, in seconds. Median of SNTP-style round trips."""
-    offs = []
+def clock_offset(samples: int = 21) -> float:
+    """Robot clock minus ours, in seconds, from the SNTP-style round trip with the lowest RTT.
+
+    NOT the median. MEASURED 2026-09-23 over Starlink: single samples ranged -8 to +1032 ms,
+    a median of 9 landed at +441 ms against a true ~+11, and the run reported 522 ms of
+    "transport" that were really ~90. The error of one sample is bounded by its own RTT/2,
+    so the fastest round trip is the one to trust — the same rule NTP applies.
+    """
+    best = None
     for _ in range(samples):
         t1 = time.time()
         with urllib.request.urlopen(f"{MJPEG}/health", timeout=5) as r:
             now = float(__import__("json").loads(r.read())["now"])
         t2 = time.time()
-        offs.append(now - (t1 + t2) / 2)
-    return st.median(offs)
+        if best is None or t2 - t1 < best[0]:
+            best = (t2 - t1, now - (t1 + t2) / 2)
+    return best[1]
 
 
 def pct(xs, p):
