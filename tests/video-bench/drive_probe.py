@@ -6,10 +6,17 @@ relay prefixes to every frame (the robot's clock when the camera produced it). T
 agnostic on purpose: it reports the same numbers whether the robot -> HQ hop is TCP or UDP,
 which is the comparison it was written for (PLAN-VIDEO.md 6.i).
 
-Every stall is attributed. If the capture times of the two frames around a gap are also far
-apart, the ROBOT did not produce frames (source); if they are the normal ~70 ms apart while
-arrival jumped, the frames were produced on time and held up on the way (link). MEASURED
-2026-09-23 over Starlink on TCP: 10 stalls of 250-916 ms in 150 s, all "link".
+Every stall is split in two kinds, and they are different failures:
+
+  held     the capture times around the gap are the normal ~70 ms apart while arrival
+           jumped: the frames were produced on time and HELD on the way. This is the TCP
+           freeze — retransmission blocking everything behind it.
+  missing  the capture times jump as much as the arrival did: frames never arrived. Over TCP
+           that can only be the robot not producing them; over UDP it is ALSO what a lost
+           frame looks like, so this probe alone cannot tell the two apart there.
+
+MEASURED 2026-09-23 over Starlink, QP 40, 150 s each: on TCP 10 stalls of 250-916 ms, all
+"held"; on UDP 1 "held" (258 ms) and 6 "missing".
 
 The clock offset uses the round trip with the LOWEST RTT, not a median: over Starlink single
 samples ranged -8 to +1032 ms and a median once landed 430 ms off (see field_probe.py).
@@ -83,7 +90,7 @@ def main():
     stalls = [g for g in gaps if g[0] > STALL_MS]
     print(f"\nSTALLS over {STALL_MS:.0f} ms: {len(stalls)}")
     for gap, cgap, t in stalls:
-        where = "source" if cgap > 0.6 * gap else "link"
+        where = "missing" if cgap > 0.6 * gap else "held"
         stamp = time.strftime("%H:%M:%S", time.localtime(t))
         print(f"  {stamp}.{int(t % 1 * 1000):03d}  gap {gap:5.0f} ms  capture-gap {cgap:5.0f} ms"
               f"  -> {where}")
