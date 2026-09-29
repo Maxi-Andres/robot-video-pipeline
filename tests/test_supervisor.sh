@@ -35,6 +35,12 @@ n=$(cat "$COUNTER" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" >"$COUNTER"
 echo "[gst stub] run #$n" >&2
 head -c 16 >/dev/null || true          # consume a little of the stream
 if [ "$n" -le "${CRASHES:-0}" ]; then
+  if [ "${CRASH_KIND:-abort}" = segv ]; then
+    # The REAL gst-launch on SIGSEGV: without --no-fault its fault handler spins forever
+    # waiting for gdb, so the process never exits. With it, the segfault is just an exit.
+    case " $* " in *" --no-fault "*) exit 139 ;; esac
+    echo "Caught SIGSEGV" >&2; while :; do sleep 1; done
+  fi
   exit 134                             # SIGABRT, the double free
 fi
 # "healthy" has to mean STILL RUNNING, not "exited 0" — otherwise the case never tests
@@ -85,3 +91,16 @@ echo
 run_case "intermittent: 3 crashes, then healthy" 3 12
 HEALTHY_BLOCKS=0 run_case "persistent: 7 crashes in a row" 7 14
 HEALTHY_BLOCKS=0 run_case "clean EOS on the first run"     0 8
+
+# REQUIREMENT 5, and the only case here that FAILS the script: a segfault must be retried
+# like any other crash. It is the case that was live on the robot on 2026-09-29.
+: >"$COUNTER"
+CRASH_KIND=segv CRASHES=2 timeout 10 bash "$BASE/robot/run-video.sh" >"$BASE/out" 2>&1
+starts=$(grep -cE 'gst stub. run #' "$BASE/out")
+echo "--- segfault: 2 SIGSEGV, then healthy ---"
+echo "  encoder starts: $starts (need >= 3)"
+if [ "$starts" -lt 3 ]; then
+  echo "FAIL: a segfaulting encoder was never retried — gst-launch is spinning in its fault handler" >&2
+  exit 1
+fi
+echo "PASS"

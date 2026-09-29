@@ -315,7 +315,16 @@ encode_and_publish() {
     # peak-bitrate is deliberately NOT set: gst-inspect on this robot documents it as
     # "Peak bitrate in variable control-rate", so it applies to VBR only and would be
     # silently ignored here. Switch CONTROL_RATE to 0 if you ever want that trade.
-    gst-launch-1.0 -q $HEAD ! $SINK
+    #
+    # --no-fault is what lets this loop see a SEGFAULT at all. By default gst-launch installs
+    # a fault handler that, on SIGSEGV, prints "Spinning. Please run 'gdb gst-launch-1.0
+    # <pid>'" and then WAITS FOREVER for a debugger. The process never exits, so `rc=$?`
+    # below is never reached and nothing is retried. MEASURED on the robot 2026-09-29: the
+    # encoder segfaulted during a boot-time rebuild (the SRT sink had failed five times while
+    # the tunnel was still coming up), sat spinning, and mjpeg_server logged every frame as
+    # "dropped to NVR" — the H.264 branch was dead with the unit reporting "running". The
+    # double free is a SIGABRT and bypasses the handler, which is why this stayed hidden.
+    gst-launch-1.0 -q --no-fault $HEAD ! $SINK
     rc=$?
 
     # Exit 0 is a clean EOS: nothing left to encode, so the OUTER loop should rebuild the
