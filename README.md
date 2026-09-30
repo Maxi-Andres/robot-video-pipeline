@@ -18,6 +18,13 @@ navegador.
 
 ---
 
+
+## Go2 vs G1
+
+This repo serves both robots. Files prefixed `go2_` run only on the Go2, `g1_` (or under
+`host/g1/`) only on the G1, unprefixed ones on both; `ROBOT_MODEL` picks the variant. The
+full map — what runs where, per repo — is `robot-splunk-docs/QUE-CORRE-EN-CADA-ROBOT.md`.
+
 ## 2. Cómo funciona (la cadena completa)
 
 ```
