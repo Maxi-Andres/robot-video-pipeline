@@ -28,7 +28,7 @@ SERVER_ONLY="${SERVER_ONLY:-0}"
 [ -x ./mediamtx ] || { echo "mediamtx binary missing (run ./setup.sh)" >&2; exit 1; }
 if [ "$SERVER_ONLY" != 1 ]; then
   # Only the local-capture path needs these; in SERVER_ONLY mode the robot encodes.
-  [ -x ./go2_jpeg_stream ] || { echo "build first: ./build.sh" >&2; exit 1; }
+  [ -x ./videohub_jpeg_stream ] || { echo "build first: ./build.sh" >&2; exit 1; }
   [ -x "$FFMPEG" ]         || { echo "ffmpeg missing (run ./setup.sh)" >&2; exit 1; }
 fi
 
@@ -58,14 +58,14 @@ while [ "$running" = 1 ]; do
   fi
 
   echo "[run] starting capture -> encode -> publish"
-  # go2_jpeg_stream exits after a few seconds without frames (robot offline); ffmpeg
+  # videohub_jpeg_stream exits after a few seconds without frames (robot offline); ffmpeg
   # then gets EOF and exits. The loop restarts the pair, so the stream re-publishes
   # cleanly as soon as the robot is back.
   # NOTE: force constant output rate (-vsync cfr -r 15). Without it, the JPEG frames'
   # wallclock timestamps arrive irregularly (esp. the G1) and ffmpeg stalls its RTSP
   # output -> mediamtx drops the publisher with an i/o timeout and the stream dies a
   # few seconds after starting. CFR normalizes the cadence and keeps the publish alive.
-  ./go2_jpeg_stream "$NIC" "$MAXFPS" | "$FFMPEG" -hide_banner -loglevel warning \
+  ./videohub_jpeg_stream "$NIC" "$MAXFPS" | "$FFMPEG" -hide_banner -loglevel warning \
     -f mjpeg -use_wallclock_as_timestamps 1 -i pipe:0 \
     -c:v libx264 -preset ultrafast -tune zerolatency -pix_fmt yuv420p \
     -vsync cfr -r 15 -g 15 \

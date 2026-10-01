@@ -17,7 +17,7 @@ REPO=$(cd "$(dirname "$0")/.." && pwd)
 
 mkdir -p "$BASE/robot" "$BASE/bin"
 cp "$REPO/robot/run-video.sh" "$BASE/robot/"
-printf '#!/bin/sh\nsleep 30\n' >"$BASE/go2_jpeg_stream"; chmod +x "$BASE/go2_jpeg_stream"
+printf '#!/bin/sh\nsleep 30\n' >"$BASE/videohub_jpeg_stream"; chmod +x "$BASE/videohub_jpeg_stream"
 # The stub records the pipeline it was handed and then blocks, so the supervisor sees a healthy
 # encoder and the script does not spin.
 cat >"$BASE/bin/gst-launch-1.0" <<'EOF'
@@ -82,6 +82,18 @@ capture SOURCE=nonsense >/dev/null
 grep -q "SOURCE must be jpeg or multicast" "$BASE/log" \
   && echo "    ok      rejected" \
   || { echo "    MISSING the rejection"; fail=1; }
+
+echo
+echo "the G1's env file (robot/video.g1.env.example) builds the G1's pipeline"
+# Loaded the way systemd's EnvironmentFile does: every KEY=VALUE line, comments skipped.
+g1_env=$(grep -E '^[A-Z0-9_]+=' "$REPO/robot/video.g1.env.example" | tr '\n' ' ')
+# shellcheck disable=SC2086
+line=$(capture $g1_env MJPEG_ENABLE=0)
+check  "reads the videohub JPEG"       "nvjpegdec"                                   "$line"
+check  "scales to 720p before encoding" "width=1280,height=720"                      "$line"
+check  "bitrate per frame at 15 fps"   "bitrate=133333"                              "$line"
+check  "pushes SRT to the G1 bridge"   "srtsink uri=srt://127.0.0.1:8893?latency=150" "$line"
+refute "never the Go2's bridge port"   ":8891"                                       "$line"
 
 echo
 [ "$fail" = 0 ] && echo "all checks passed" || echo "FAILURES above"

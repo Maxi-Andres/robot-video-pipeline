@@ -25,3 +25,9 @@ jobs:
       # The C++ here links against the Unitree SDK, which is not vendored — it is cloned on
       # the robot and on the dev box. Nothing to compile in CI; the tests cover the Python
       # layer and read the C++ dispatch table as text where it matters.
+      - name: Shell harnesses (run-video.sh)
+        # Not in pre-commit on purpose: they drive the real run-video.sh with stub gst-launch and
+        # take ~2 min together (84 s + 44 s, measured 2026-10-01), too slow for every commit.
+        # They hold the cases that only these can see: the per-robot pipeline each SOURCE and env
+        # file builds (G1 included), and the encoder supervisor — segfault retry among them.
+        run: bash tests/test_video_source.sh && bash tests/test_supervisor.sh

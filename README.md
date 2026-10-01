@@ -25,11 +25,24 @@ This repo serves both robots. Files prefixed `go2_` run only on the Go2, `g1_` (
 `host/g1/`) only on the G1, unprefixed ones on both; `ROBOT_MODEL` picks the variant. The
 full map — what runs where, per repo — is `robot-splunk-docs/QUE-CORRE-EN-CADA-ROBOT.md`.
 
+**In this repo the robot side is shared.** Both robots run the same `robot/run-video.sh`,
+the same `robot/mjpeg_server.py` and the same `videohub_jpeg_stream` (renamed from
+`go2_jpeg_stream` on 2026-10-01): the G1's camera is a RealSense owned by Unitree's
+`videohub_pc4`, which answers the same `GetImageSample` request as the Go2's. What differs is
+config only — `robot/video.g1.env.example` — and, on HQ, the G1's own bridge and path:
+
+| | Go2 | G1 |
+|---|---|---|
+| env file | `robot/video.env.example` | `robot/video.g1.env.example` |
+| SRT bridge on HQ | `systemd/srt-bridge.service`, `:8891` → `udp:9000` | `systemd/srt-bridge-g1.service`, `:8893` → `udp:9001` |
+| mediamtx path / Frigate camera | `robot` | `g1` |
+| Go2-only | `src/go2_h264_stream.cpp` (`SOURCE=multicast`) | — |
+
 ## 2. Cómo funciona (la cadena completa)
 
 ```
 ┌─────────┐   JPEG por DDS    ┌──────────────────┐   MJPEG    ┌─────────┐  H.264   ┌──────────┐  RTSP   ┌─────────┐
-│  Robot  │ ───(SDK Unitree)─▶│ go2_jpeg_stream  │ ──(pipe)──▶│ ffmpeg  │ ───────▶ │ mediamtx │ ──────▶ │ Frigate │
+│  Robot  │ ───(SDK Unitree)─▶│ videohub_jpeg_stream  │ ──(pipe)──▶│ ffmpeg  │ ───────▶ │ mediamtx │ ──────▶ │ Frigate │
 │  Go2    │   videohub 1001   │  (C++, propio)   │   stdout   │ (encode)│          │ (server) │  :8554  │  (NVR)  │
 └─────────┘                   └──────────────────┘            └─────────┘          └──────────┘         └─────────┘
                                                                                         │ también            │
@@ -40,7 +53,7 @@ full map — what runs where, per repo — is `robot-splunk-docs/QUE-CORRE-EN-CA
 
 Paso a paso:
 
-1. **`go2_jpeg_stream`** (programa propio en C++) le pide fotos a la cámara del robot
+1. **`videohub_jpeg_stream`** (programa propio en C++) le pide fotos a la cámara del robot
    usando el SDK de Unitree (función `GetImageSample`, servicio "videohub", API 1001).
    El robot devuelve un **JPEG** por cada pedido (~180 KB, 1920×1080). El programa
    escribe esos JPEG uno atrás de otro por su salida estándar (un stream MJPEG).
@@ -64,7 +77,7 @@ apagado**, y podés enchufar otro NVR distinto sin cambiar nada de la captura.
 |------------|--------|------------------|
 | **Unitree SDK2** (C++) | SDK oficial del robot | Es la única forma de leer la cámara: el video va por DDS, no por una URL |
 | **DDS / CycloneDDS** | Bus de mensajería en tiempo real | Es el transporte interno del robot; el SDK habla DDS por debajo |
-| **`go2_jpeg_stream`** | Programa propio (C++) | Pide los JPEG de la cámara y los vuelca como stream. Es el "adaptador" robot→ffmpeg |
+| **`videohub_jpeg_stream`** | Programa propio (C++) | Pide los JPEG de la cámara y los vuelca como stream. Es el "adaptador" robot→ffmpeg |
 | **FFmpeg** | Suite de video | Codifica JPEG→H.264 y lo empuja por RTSP. Va como binario estático en `bin/` (no ensucia el sistema) |
 | **MediaMTX** | Servidor RTSP/HLS/WebRTC | Recibe el stream y lo reparte en protocolos estándar. Un solo binario, sin instalar |
 | **Frigate** | NVR open-source | Muestra en vivo, **graba**, tiene línea de tiempo y detección de objetos. Corre en Docker |
@@ -79,7 +92,7 @@ apagado**, y podés enchufar otro NVR distinto sin cambiar nada de la captura.
 ```bash
 cd ~/Desktop/robot-ecosystem/robot-video-pipeline
 ./setup.sh          # descarga mediamtx + ffmpeg (no se versionan en git)
-./build.sh          # compila go2_jpeg_stream contra el SDK (necesita g++)
+./build.sh          # compila videohub_jpeg_stream contra el SDK (necesita g++)
 ```
 
 ### Prender todo
@@ -189,7 +202,7 @@ Para que ocupe **mucho menos disco**, cambiá `mode: all` por `mode: motion`, o 
 ```
 robot-video-pipeline/
 ├── src/
-│   ├── go2_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
+│   ├── videohub_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
 │   └── go2_h264_stream.cpp   ← intento de H.264 nativo (NO funciona en este robot, ver §8)
 ├── setup.sh                  ← descarga mediamtx + ffmpeg (no versionados)
 ├── build.sh                  ← compila los programas C++

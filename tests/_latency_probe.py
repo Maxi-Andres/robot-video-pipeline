@@ -6,7 +6,7 @@ glass-to-glass. This splits that number into the stages that produce it, so the 
 where the milliseconds actually are instead of where they are assumed to be.
 
 HOW: `mjpeg_server` with STAMP=1 splices two robot-side timestamps into a JPEG COM segment
-(t_in = frame pulled off go2_jpeg_stream, t_out = published to viewers). COM is ignored by
+(t_in = frame pulled off videohub_jpeg_stream, t_out = published to viewers). COM is ignored by
 every decoder and every hop downstream forwards the bytes untouched, so the same stamp is
 still readable at the browser socket. Costs 1.4 us per frame — measured — which is why it
 can be left on during a real drive without changing what it measures.

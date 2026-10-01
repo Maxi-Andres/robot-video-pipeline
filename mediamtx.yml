@@ -57,3 +57,11 @@ paths:
     # To go back to RTMP: `source: publisher` here, and PROTO=rtmp on the robot. Both ends
     # must agree — this path can only have one kind of source at a time.
     source: udp+mpegts://127.0.0.1:9000
+
+  # The G1's camera. Same chain as `robot` (the Go2) on its own port pair, so the two robots
+  # can stream at the same time and record as two separate Frigate cameras:
+  #   G1 PC2 --SRT--> srt-bridge-g1 :8893 --udp+mpegts--> :9001 --> this path
+  # `robot` keeps its name for the Go2 instead of becoming `go2`: Frigate, the AI-VL camera
+  # bridge and the Splunk dashboard all read it by that name today. docs/DOS-ROBOTS.md.
+  g1:
+    source: udp+mpegts://127.0.0.1:9001

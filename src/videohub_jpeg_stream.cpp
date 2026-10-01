@@ -1,8 +1,15 @@
-// go2_jpeg_stream — pull the Go2 front camera as JPEG via the Unitree SDK video
+// videohub_jpeg_stream — pull the robot's front camera as JPEG via the Unitree SDK video
 // service (GetImageSample, request/response over DDS) and write a concatenated MJPEG
 // stream to stdout. Meant to be piped into ffmpeg to encode H.264 and push RTSP:
 //
-//   go2_jpeg_stream enp4s0 | ffmpeg -f mjpeg -i pipe:0 -c:v libx264 ... -f rtsp ...
+// SHARED: runs on the Go2 AND the G1, which is why it has no robot prefix (it was
+// go2_jpeg_stream until 2026-10-01). The client class is go2::VideoClient because that is
+// where the SDK files it, but the G1's videohub (videohub_pc4, which owns the RealSense
+// colour node /dev/video4 on PC2) answers the same request. MEASURED on the G1 2026-10-01:
+// 567 calls in 10 s, 150 distinct JPEGs = 15.0 fps at 1920x1080, ~150 KB each.
+// On the G1, rt/frontvideostream delivered 0 samples the same minute — use this, not that.
+//
+//   videohub_jpeg_stream enp4s0 | ffmpeg -f mjpeg -i pipe:0 -c:v libx264 ... -f rtsp ...
 //
 // Why this and not the native H.264 topic (rt/frontvideostream): on this Go2 the
 // large H.264 DDS samples do not deliver cleanly — the ROS2/cyclonedds bridge
@@ -10,7 +17,7 @@
 // never reassembles a sample. The videohub JPEG path is small, reliable, and is what
 // the AI-VL camera bridge already uses. Trade-off: one JPEG->H.264 re-encode.
 //
-// Usage:  go2_jpeg_stream [network_interface] [max_fps]
+// Usage:  videohub_jpeg_stream [network_interface] [max_fps]
 //   network_interface  NIC on the robot network (default "enp4s0")
 //   max_fps            cap the poll rate (default 0 = as fast as the robot answers)
 
@@ -47,7 +54,7 @@ int main(int argc, char** argv) {
     const double max_fps  = (argc > 2) ? atof(argv[2]) : 0.0;
     const long min_gap_ns = (max_fps > 0.0) ? (long)(1e9 / max_fps) : 0;
 
-    fprintf(stderr, "[go2_jpeg_stream] nic=%s max_fps=%.1f\n", nic.c_str(), max_fps);
+    fprintf(stderr, "[videohub_jpeg_stream] nic=%s max_fps=%.1f\n", nic.c_str(), max_fps);
 
     ChannelFactory::Instance()->Init(0, nic);
     go2::VideoClient vc;
@@ -67,9 +74,9 @@ int main(int argc, char** argv) {
         img.clear();
         int r = vc.GetImageSample(img);
         if (r != 0 || img.size() < 4 || img[0] != 0xFF || img[1] != 0xD8) {
-            if (++empty % 30 == 0) fprintf(stderr, "[go2_jpeg_stream] no frame (ret=%d)\n", r);
+            if (++empty % 30 == 0) fprintf(stderr, "[videohub_jpeg_stream] no frame (ret=%d)\n", r);
             if (time(nullptr) - last_ok >= noframe_timeout) {
-                fprintf(stderr, "[go2_jpeg_stream] no frames for %lds — exiting for restart\n",
+                fprintf(stderr, "[videohub_jpeg_stream] no frames for %lds — exiting for restart\n",
                         noframe_timeout);
                 return 2;
             }
@@ -86,7 +93,7 @@ int main(int argc, char** argv) {
         if (fwrite(img.data(), 1, img.size(), stdout) != img.size()) return 0;
         fflush(stdout);
         prev = img;
-        if (++sent % 100 == 0) fprintf(stderr, "[go2_jpeg_stream] %ld frames\n", sent);
+        if (++sent % 100 == 0) fprintf(stderr, "[videohub_jpeg_stream] %ld frames\n", sent);
         // Sleep only the REMAINDER of the frame interval, measured from the start of this
         // cycle. Sleeping min_gap_ns outright added it on top of however long the robot took
         // to answer, so "max 15 fps" against a ~270 ms request became ~3 fps — a 25% loss

@@ -7,7 +7,7 @@ SPLITS the stall by stage, which is the part that decides where to look next.
 mjpeg_server already stamps two robot-side times into every frame and nothing has ever read
 the difference between them:
 
-    t_in           pump() pulled the frame off go2_jpeg_stream's stdout  -> the VIDEOHUB's
+    t_in           pump() pulled the frame off videohub_jpeg_stream's stdout  -> the VIDEOHUB's
                    own cadence, since GetImageSample has already returned by then
     t_out - t_in   what this process costs (a resize, if MJPEG_WIDTH > 0)
     now  - t_out   everything after the robot: link, and our own read

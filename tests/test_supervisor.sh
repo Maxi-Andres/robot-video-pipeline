@@ -21,12 +21,12 @@ mkdir -p "$BASE/robot" "$BASE/bin"
 cp "$REPO/robot/run-video.sh" "$BASE/robot/"
 
 # Stub capture: never exits on its own, so anything that ends the run came from the encoder.
-cat >"$BASE/go2_jpeg_stream" <<'EOF'
+cat >"$BASE/videohub_jpeg_stream" <<'EOF'
 #!/usr/bin/env bash
-echo "[go2_jpeg_stream] stub nic=$1 max_fps=$2" >&2
+echo "[videohub_jpeg_stream] stub nic=$1 max_fps=$2" >&2
 while :; do printf '\xff\xd8frame\xff\xd9'; sleep 0.05; done
 EOF
-chmod +x "$BASE/go2_jpeg_stream"
+chmod +x "$BASE/videohub_jpeg_stream"
 
 # Stub encoder: behaviour driven by a counter file so each case can script the failures.
 cat >"$BASE/bin/gst-launch-1.0" <<'EOF'
@@ -79,7 +79,7 @@ run_case() {
     >"$BASE/out" 2>&1
   echo "--- $name (crashes=$crashes) ---"
   grep -cE 'gst stub. run #' "$BASE/out" | sed 's/^/  encoder starts: /'
-  grep -c 'go2_jpeg_stream. stub' "$BASE/out" | sed 's/^/  capture starts: /'
+  grep -c 'videohub_jpeg_stream. stub' "$BASE/out" | sed 's/^/  capture starts: /'
   grep -E 'restarting it in|rebuilding capture|reached EOS|pipeline ended' "$BASE/out" \
     | sed 's/^/  | /' | head -8
   echo

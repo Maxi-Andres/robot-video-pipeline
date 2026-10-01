@@ -46,7 +46,7 @@ echo
 # --- 2. pipeline processes ---
 echo "PROCESOS DEL PIPELINE"
 pgrep -f "mediamtx.yml"     >/dev/null 2>&1 && ok "mediamtx (servidor RTSP/HLS/WebRTC)" || bad "mediamtx caido"
-pgrep -f "go2_jpeg_stream"  >/dev/null 2>&1 && ok "go2_jpeg_stream (captura del robot)" || bad "captura caida"
+pgrep -f "videohub_jpeg_stream"  >/dev/null 2>&1 && ok "videohub_jpeg_stream (captura del robot)" || bad "captura caida"
 pgrep -f "bin/ffmpeg"       >/dev/null 2>&1 && ok "ffmpeg (encode H.264)"               || bad "ffmpeg caido"
 echo
 

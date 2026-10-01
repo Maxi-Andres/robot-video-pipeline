@@ -29,7 +29,7 @@ muestra en vivo y lo graba. Corre aparte del stack AI-VL — no lo toca.
 
 ```
 ┌───────────┐   JPEG por DDS    ┌──────────────────┐  MJPEG   ┌─────────┐  H.264   ┌──────────┐  RTSP   ┌─────────┐
-│  ROBOT    │ ───(videohub)───▶ │ go2_jpeg_stream  │ ─(pipe)─▶│ ffmpeg  │ ───────▶ │ mediamtx │ ──────▶ │ Frigate │
+│  ROBOT    │ ───(videohub)───▶ │ videohub_jpeg_stream  │ ─(pipe)─▶│ ffmpeg  │ ───────▶ │ mediamtx │ ──────▶ │ Frigate │
 │ Go2 / G1  │  GetImageSample   │  (C++, propio)   │  stdout  │ (encode)│          │ (server) │  :8554  │  (NVR)  │
 └───────────┘  api_id 1001      └──────────────────┘          └─────────┘          └──────────┘         └─────────┘
   192.168.123.x                  usa unitree_sdk2              -vsync cfr -r 15      :8554 RTSP           graba + web
@@ -44,7 +44,7 @@ muestra en vivo y lo graba. Corre aparte del stack AI-VL — no lo toca.
    de su cámara (~180–240 KB, 1920×1080). Es request/response: pedís una foto, te la
    da. Los dos robots responden a este mismo servicio.
 
-2. **`go2_jpeg_stream`** (programa propio en C++, `src/go2_jpeg_stream.cpp`) hace ese
+2. **`videohub_jpeg_stream`** (programa propio en C++, `src/videohub_jpeg_stream.cpp`) hace ese
    pedido en loop, lo más rápido que el robot contesta. Cada JPEG que llega lo escribe
    por su **salida estándar** (stdout), uno atrás de otro → un stream **MJPEG**.
    - Descarta frames byte-idénticos consecutivos (si el robot devuelve la misma foto
@@ -83,7 +83,7 @@ podés enchufar otro NVR distinto sin tocar la captura.
 |------------|--------|--------------|
 | **Unitree SDK2** (C++) | SDK oficial del robot | Única forma de leer la cámara: el video va por DDS, no por URL. Nuestro programa se **compila contra** su lib (`libunitree_sdk2.a`) |
 | **DDS / CycloneDDS** | Bus de mensajería en tiempo real | Es el transporte interno del robot; el SDK habla DDS por debajo |
-| **`go2_jpeg_stream`** | Programa propio (C++) | El "adaptador" robot→ffmpeg: pide los JPEG y los vuelca como stream |
+| **`videohub_jpeg_stream`** | Programa propio (C++) | El "adaptador" robot→ffmpeg: pide los JPEG y los vuelca como stream |
 | **FFmpeg** | Suite de video | Codifica JPEG→H.264 y publica por RTSP. Va como binario **estático** en `bin/` (no ensucia el sistema) |
 | **MediaMTX** | Servidor RTSP/HLS/WebRTC | Recibe el stream y lo reparte en protocolos estándar. Un solo binario, sin instalar |
 | **Frigate** | NVR open-source | Muestra en vivo, **graba**, línea de tiempo, detección. Corre en Docker |
@@ -104,7 +104,7 @@ unitree_sdk2/include/unitree/robot/go2/video/
 └── video_error.hpp
 ```
 
-Nuestro código la usa en `src/go2_jpeg_stream.cpp`:
+Nuestro código la usa en `src/videohub_jpeg_stream.cpp`:
 ```cpp
 #include <unitree/robot/go2/video/video_client.hpp>   // trae la parte de video
 ChannelFactory::Instance()->Init(0, nic);             // conecta al DDS del robot (dominio 0, enp4s0)
@@ -219,7 +219,7 @@ Cómo ver el video:
 
 ```
 robot-video-pipeline/
-├── src/go2_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
+├── src/videohub_jpeg_stream.cpp   ← captura JPEG del robot (camino que se usa)
 ├── src/go2_h264_stream.cpp   ← intento de H.264 nativo (no funciona en este robot)
 ├── setup.sh                  ← descarga mediamtx + ffmpeg (no versionados en git)
 ├── build.sh                  ← compila los programas C++

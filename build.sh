@@ -26,8 +26,8 @@ LIBS=("$SDK/lib/$ARCH/libunitree_sdk2.a" -L"$SDK/thirdparty/lib/$ARCH" -lddscxx 
       -Wl,-rpath,"$SDK/thirdparty/lib/$ARCH" -lpthread)
 
 # Primary path: JPEG (videohub) -> stdout. Reliable on this Go2.
-g++ -O2 -std=c++17 src/go2_jpeg_stream.cpp -o go2_jpeg_stream "${INCS[@]}" "${LIBS[@]}"
-echo "built ./go2_jpeg_stream"
+g++ -O2 -std=c++17 src/videohub_jpeg_stream.cpp -o videohub_jpeg_stream "${INCS[@]}" "${LIBS[@]}"
+echo "built ./videohub_jpeg_stream"
 
 # Experimental path: native H.264 (rt/frontvideostream). Does NOT deliver cleanly on
 # this robot (see README); kept for future firmware / other units.

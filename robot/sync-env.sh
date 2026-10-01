@@ -8,12 +8,15 @@
 # (run-video.sh has defaults) but they are invisible and untunable, which is worse than
 # either extreme.
 #
-#   bash robot/sync-env.sh
+#   bash robot/sync-env.sh                                   # Go2
+#   EXAMPLE=video.g1.env.example bash robot/sync-env.sh      # G1
 #   sudo systemctl restart robot-video
 set -euo pipefail
 cd "$(dirname "$0")"
 
-EXAMPLE="video.env.example"
+# The G1 passes EXAMPLE=video.g1.env.example: its keys are the same, its values are not, and
+# a key added from the Go2's example would bring the Go2's value with it.
+EXAMPLE="${EXAMPLE:-video.env.example}"
 TARGET="video.env"
 
 [ -f "$EXAMPLE" ] || { echo "missing $EXAMPLE" >&2; exit 1; }
