@@ -1,7 +1,12 @@
 # Frigate NVR config — records + monitors both robots' cameras, as published by mediamtx.
-#   robot  the Go2   robot -SRT-> srt-bridge :8891 -> mediamtx path `robot` -> here
+#   go2    the Go2   robot -SRT-> srt-bridge :8891 -> mediamtx path `robot` -> here
 #   g1     the G1    robot -SRT-> srt-bridge-g1 :8893 -> mediamtx path `g1` -> here
 # Two cameras, two recording histories — the goal of docs/DOS-ROBOTS.md.
+#
+# The CAMERA is named after the robot; the mediamtx PATH of the Go2 is still `robot`. The
+# camera was `robot` too until 2026-10-01: footage recorded before that stays on disk under
+# recordings/<date>/<hour>/robot/ but no longer shows in the UI (3-day retention ages it out).
+# Anything that reads Frigate's MJPEG by camera name now asks for /api/go2 or /api/g1.
 version: 0.14
 
 mqtt:
@@ -13,7 +18,7 @@ detectors:
     type: cpu
 
 cameras:
-  robot:
+  go2:
     ffmpeg:
       inputs:
         # mediamtx runs on the host; reach it by the host's robot-network IP.
