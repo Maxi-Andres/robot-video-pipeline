@@ -1,0 +1,32 @@
+# SRT receiver for the G1's H.264 stream, on the HQ side. The G1 twin of srt-bridge.service
+# (read that one for WHY a bridge exists at all: the robots' libsrt 1.4.0 cannot handshake
+# with mediamtx's own SRT listener). Same binary, same flags, its own port pair:
+#
+#     G1 PC2 --SRT/UDP--> :8893 srt-live-transmit --udp+mpegts--> :9001 mediamtx path `g1`
+#
+# A separate unit and not an instance of the Go2's: both run on HQ at the same time, and a
+# robot that floods or wedges its bridge must not take the other robot's video with it.
+# Named -g1 (not .g1.service) because it is installed NEXT TO srt-bridge.service, not in
+# place of it — the .g1.service convention is for units that replace the Go2's on the robot.
+#
+# Ports: 8893 because 8891 is the Go2's bridge and 8892 is mediamtx's MoQ listener.
+#
+# Install:
+#   cp systemd/srt-bridge-g1.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now srt-bridge-g1
+[Unit]
+Description=SRT -> UDP/MPEG-TS bridge for the G1 video stream
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/srt-live-transmit \
+  -stats-report-frequency:2000 -statspf:json -fullstats -loglevel:note \
+  "srt://:8893?mode=listener&latency=150" \
+  "udp://127.0.0.1:9001"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

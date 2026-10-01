@@ -1,5 +1,7 @@
-# Frigate NVR config — records + monitors the Go2 camera published by mediamtx.
-# Source chain:  robot -> go2_jpeg_stream -> ffmpeg -> mediamtx (:8554/robot) -> Frigate
+# Frigate NVR config — records + monitors both robots' cameras, as published by mediamtx.
+#   robot  the Go2   robot -SRT-> srt-bridge :8891 -> mediamtx path `robot` -> here
+#   g1     the G1    robot -SRT-> srt-bridge-g1 :8893 -> mediamtx path `g1` -> here
+# Two cameras, two recording histories — the goal of docs/DOS-ROBOTS.md.
 version: 0.14
 
 mqtt:
@@ -30,5 +32,28 @@ cameras:
       retain:
         days: 3
         mode: all       # keep continuous footage, not just events
+    snapshots:
+      enabled: true
+
+  # The G1. Same settings as the Go2's camera; it streams 1280x720 (scaled on the robot, see
+  # robot/video.g1.env.example), so detect at that size rather than make Frigate rescale.
+  g1:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.20.99:8554/g1
+          roles:
+            - detect
+            - record
+      input_args: preset-rtsp-generic
+    detect:
+      enabled: true
+      width: 1280
+      height: 720
+      fps: 5
+    record:
+      enabled: true
+      retain:
+        days: 3
+        mode: all
     snapshots:
       enabled: true

@@ -3,7 +3,7 @@
 mjpeg_server — a passthrough tee: serves the robot's JPEG frames over HTTP while forwarding
 them, byte for byte, to whatever comes next in the pipe.
 
-    go2_jpeg_stream | mjpeg_server.py | gst-launch-1.0 ... (H.264 -> RTMP -> NVR)
+    videohub_jpeg_stream | mjpeg_server.py | gst-launch-1.0 ... (H.264 -> RTMP -> NVR)
                            |
                            +-- HTTP /stream  -> AI-VL camera bridge, Splunk <img>, browsers
 
@@ -419,7 +419,7 @@ _TAG = b"AVL1 "
 def stamp(jpeg, t_in, t_out):
     """Splice a COM segment carrying the two robot-side timestamps, as ASCII seconds.
 
-    t_in  — when pump() pulled the frame off go2_jpeg_stream's stdout
+    t_in  — when pump() pulled the frame off videohub_jpeg_stream's stdout
     t_out — when it was published to viewers, i.e. after any resize
 
     Their difference is this process's own cost; the difference between t_out and a
@@ -1281,7 +1281,7 @@ def pump():
     """stdin -> stdout passthrough, publishing each JPEG as it goes by.
 
     Frames are found by SOI/EOI markers rather than by trusting any framing, which is what
-    makes this composable with go2_jpeg_stream's raw concatenated output.
+    makes this composable with videohub_jpeg_stream's raw concatenated output.
     """
     src = sys.stdin.buffer
     buf = b""
@@ -1311,7 +1311,7 @@ def pump():
             buf = buf[end + 2:]
             # Live first: it is the branch whose latency we care about.
             # t_in is read here, the earliest instant this process can see the frame —
-            # go2_jpeg_stream's GetImageSample has already returned and the pipe is
+            # videohub_jpeg_stream's GetImageSample has already returned and the pipe is
             # effectively free, so it doubles as "when the robot handed us the frame".
             # t_in is taken unconditionally, ~50 ns: STAMP controls what is spliced INTO
             # the frame, but /health's wait/work split needs the timestamp either way.

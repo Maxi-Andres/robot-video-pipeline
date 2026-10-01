@@ -12,6 +12,6 @@ echo "[stop] Frigate"
 echo "[stop] pipeline service"
 systemctl --user stop robot-video-pipeline.service 2>/dev/null || true
 # Clean up any stray manually-launched processes too.
-pkill -f "go2_jpeg_stream" 2>/dev/null || true
+pkill -f "videohub_jpeg_stream" 2>/dev/null || true
 pkill -f "mediamtx.yml"    2>/dev/null || true
 echo "[stop] done"

@@ -148,7 +148,7 @@ como idea teórica, no práctica con lo que hay.
 En cualquiera de los dos caminos viables, el NVR queda igual:
 
 - **mediamtx:** dos paths, `robot` → `go2` y `g1`.
-- **go2_jpeg_stream:** dos instancias (o una que demultiplexa, en la Opción C).
+- **videohub_jpeg_stream:** dos instancias (o una que demultiplexa, en la Opción C).
   - Opción A: una por dominio (`DDS_DOMAIN=0` → g1, `DDS_DOMAIN=1` → go2).
   - Opción C: una sola que rutea por GUID a `/go2` o `/g1`.
 - **`run.sh`:** el supervisor levanta las dos cadenas de captura→ffmpeg.

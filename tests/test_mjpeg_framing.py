@@ -106,7 +106,7 @@ def test_an_eoi_marker_straddling_two_chunks_is_not_lost(monkeypatch):
 def test_garbage_before_the_soi_is_discarded(monkeypatch):
     """The defect: prepending multipart headers (or any preamble) to the JPEG bytes.
 
-    `go2_jpeg_stream` concatenates frames raw, but Frigate and mediamtx wrap them in
+    `videohub_jpeg_stream` concatenates frames raw, but Frigate and mediamtx wrap them in
     multipart boundaries — the scanner has to survive both, which is exactly why it looks
     for markers instead of parsing boundaries.
     """

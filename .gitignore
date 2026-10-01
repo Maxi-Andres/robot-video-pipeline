@@ -4,6 +4,8 @@
 /mediamtx.stock.yml
 
 # --- Compiled programs (recreate with ./build.sh) ---
+/videohub_jpeg_stream
+# pre-rename binary name (renamed 2026-10-01), still present on machines built before
 /go2_jpeg_stream
 /go2_h264_stream
 *.o

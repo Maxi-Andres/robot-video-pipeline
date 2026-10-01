@@ -36,7 +36,7 @@ RestartSec=5
 #
 # CPUQuota is an ABSOLUTE ceiling: CFS freezes every task in the cgroup the moment it is
 # spent, even on an idle machine, until the next 100 ms period — a stall that shows up in no
-# lock and no profiler. And the cgroup is shared: run-video.sh launches go2_jpeg_stream,
+# lock and no profiler. And the cgroup is shared: run-video.sh launches videohub_jpeg_stream,
 # mjpeg_server.py and gst-launch as ONE pipeline, so they spend one budget between them.
 # Measured 2026-09-16 before the change: nr_throttled 14059 of 30418 periods — 46% of this
 # pipeline's CPU periods ended frozen — and the MJPEG resize cost 105 ms against 28 ms of

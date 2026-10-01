@@ -5,12 +5,12 @@
 # L2-adjacent to the robot's DDS — proven, not assumed: from another subnet the robot pings
 # fine (1.3 ms) but only 2 of 122 DDS topics are visible. See robot-splunk-docs/RED-Y-DDS.md.
 #
-#   go2_jpeg_stream (DDS) -> mjpeg_server -> nvjpegdec -> nvv4l2h264enc -> flvmux -> rtmpsink
+#   videohub_jpeg_stream (DDS) -> mjpeg_server -> nvjpegdec -> nvv4l2h264enc -> flvmux -> rtmpsink
 #                                  |
 #                                  +-- HTTP :8093/stream  (the LOW-LATENCY live path)
 #
 # Two consumers, one reader. The Unitree videohub is request/response, so a second
-# go2_jpeg_stream would steal half the frames — hence a passthrough tee instead.
+# videohub_jpeg_stream would steal half the frames — hence a passthrough tee instead.
 #
 # Why this shape:
 #   * GStreamer, not ffmpeg: the Jetson has NO ffmpeg, but it does have gst-launch-1.0 and
@@ -175,7 +175,7 @@ esac
 export CYCLONEDDS_URI="${CYCLONEDDS_URI:-<CycloneDDS><Domain><General><Interfaces><NetworkInterface name=\"$NIC\" priority=\"default\" multicast=\"default\"/></Interfaces></General></Domain></CycloneDDS>}"
 
 if [ "$SOURCE" = jpeg ]; then
-  [ -x ./go2_jpeg_stream ] || { echo "build first: UNITREE_SDK2_DIR=~/unitree_sdk2 ./build.sh" >&2; exit 1; }
+  [ -x ./videohub_jpeg_stream ] || { echo "build first: UNITREE_SDK2_DIR=~/unitree_sdk2 ./build.sh" >&2; exit 1; }
 fi
 command -v gst-launch-1.0 >/dev/null || { echo "gst-launch-1.0 missing" >&2; exit 1; }
 
@@ -370,9 +370,9 @@ while [ "$running" = 1 ]; do
     encode_and_publish || true
   else
     echo "[robot-video] starting capture -> HW encode -> $PROTO publish"
-    # go2_jpeg_stream exits after ~8 s without frames (robot's camera service down), which
+    # videohub_jpeg_stream exits after ~8 s without frames (robot's camera service down), which
     # EOFs the pipeline; the loop then republishes cleanly once video is back.
-    ./go2_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | encode_and_publish || true
+    ./videohub_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | encode_and_publish || true
   fi
 
   [ "$running" = 1 ] && { echo "[robot-video] pipeline ended; retry in 3s" >&2; sleep 3; }
