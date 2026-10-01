@@ -35,7 +35,7 @@ config only — `robot/video.g1.env.example` — and, on HQ, the G1's own bridge
 |---|---|---|
 | env file | `robot/video.env.example` | `robot/video.g1.env.example` |
 | SRT bridge on HQ | `systemd/srt-bridge.service`, `:8891` → `udp:9000` | `systemd/srt-bridge-g1.service`, `:8893` → `udp:9001` |
-| mediamtx path / Frigate camera | `robot` | `g1` |
+| mediamtx path / Frigate camera | `robot` / `go2` | `g1` / `g1` |
 | Go2-only | `src/go2_h264_stream.cpp` (`SOURCE=multicast`) | — |
 
 ## 2. Cómo funciona (la cadena completa)
