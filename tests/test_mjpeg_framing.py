@@ -264,6 +264,26 @@ def test_bad_live_params_are_refused(monkeypatch, body, why):
     assert mjpeg_server.live_params() == before, f"refused but still applied ({why})"
 
 
+@pytest.mark.parametrize("width, height", [(480, 270), (640, 360), (854, 480), (1280, 720)])
+def test_h264_width_carries_its_height(monkeypatch, width, height):
+    """The defect: a live h264_width changed only the width, so 640 came out 640x270 —
+    stretched — and the size could only be changed safely by editing video.env and
+    restarting. The height must follow, 16:9 and even."""
+    for name in ("H264_WIDTH", "H264_HEIGHT"):
+        monkeypatch.setattr(mjpeg_server, name, getattr(mjpeg_server, name))
+    mjpeg_server.set_live_params({"h264_width": width})
+    assert (width, height) == (mjpeg_server.H264_WIDTH, mjpeg_server.H264_HEIGHT)
+
+
+def test_h264_qp_alone_leaves_the_size_alone(monkeypatch):
+    for name in ("H264_QP", "H264_WIDTH", "H264_HEIGHT"):
+        monkeypatch.setattr(mjpeg_server, name, getattr(mjpeg_server, name))
+    size = (mjpeg_server.H264_WIDTH, mjpeg_server.H264_HEIGHT)
+    mjpeg_server.set_live_params({"h264_qp": 34})
+    assert mjpeg_server.H264_QP == 34
+    assert size == (mjpeg_server.H264_WIDTH, mjpeg_server.H264_HEIGHT)
+
+
 def test_one_bad_value_rejects_the_whole_request(monkeypatch):
     """The defect: validating and applying key by key, so `{fps: 10, width: 9999}` leaves
     the fps changed and the width not — a half-applied config the operator never asked
