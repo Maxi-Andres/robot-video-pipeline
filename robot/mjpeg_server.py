@@ -476,6 +476,13 @@ def live_params():
     return {"fps": FPS, "width": WIDTH, "quality": QUALITY, "hw": int(bool(HW))}
 
 
+def h264_height_for(width):
+    """The drive branch's height for a width: 16:9, as both robots' cameras are (1920x1080),
+    rounded to an EVEN number because the H.264 encoder needs even dimensions.
+    480 -> 270, 640 -> 360, 1280 -> 720. The relay persists H264_HEIGHT with the same rule."""
+    return max(2, round(width * 9 / 16 / 2) * 2)
+
+
 def set_live_params(body):
     """Apply a {fps,width,quality} subset. Returns what changed. Raises ValueError.
 
@@ -496,6 +503,11 @@ def set_live_params(body):
         if not lo <= value <= hi:
             raise ValueError(f"'{key}' must be between {lo} and {hi}, got {value}")
         staged[name] = value
+    # The height follows the width. Setting only H264_WIDTH used to leave the height at its
+    # old value — measured 2026-10-07: asking for 640 produced 640x270, a stretched picture
+    # on the view the operator steers by.
+    if "H264_WIDTH" in staged:
+        staged["H264_HEIGHT"] = h264_height_for(staged["H264_WIDTH"])
     globals().update(staged)
     return {k: globals()[LIVE_PARAMS[k][0]] for k in body}
 
