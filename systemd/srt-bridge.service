@@ -43,17 +43,19 @@ Type=simple
 # accepted and silently ignored, which is how it was first written here and why the first
 # run produced no statistics at all.
 #
-# LATENCY 1000, NOT 150. The budget SRT has to repair a loss before it gives the packet up.
+# LATENCY 900, NOT 150. The budget SRT has to repair a loss before it gives the packet up.
 # MEASURED 2026-10-07 over LTE (RTT 50-70 ms, peaks of 300+): at 150 ms the receiver dropped
 # 1-5% of packets on a quiet link and 20-49% while the uplink was busy, and a 1080p keyframe
 # is ~22 packets — one missing and the decoder predicts from garbage until the next keyframe
 # that arrives WHOLE. That is the blocky, slowly-purple footage in Frigate. Nothing reads this
 # stream to steer (the drive view is the all-intra branch), so delay is cheap here and loss is
-# not. SRT negotiates the larger of the two ends, so raising it here is enough. The cost:
-# ~850 ms more on everything fed from mediamtx — Frigate, the bridge's WHEP (YOLO, VLM).
+# not. SRT negotiates the larger of the two ends, so raising it here is enough. At 1000 it
+# went 12 minutes, 93300 packets, 22.5% lost in the air and ZERO dropped, at 1.3 Mbps; 900 is
+# the operator's trim of that. The cost: ~750 ms more on everything fed from mediamtx —
+# Frigate, the bridge's WHEP (YOLO, VLM).
 ExecStart=/usr/bin/srt-live-transmit \
   -stats-report-frequency:2000 -statspf:json -fullstats -loglevel:note \
-  "srt://:8891?mode=listener&latency=1000" \
+  "srt://:8891?mode=listener&latency=900" \
   "udp://127.0.0.1:9000"
 Restart=always
 RestartSec=3
