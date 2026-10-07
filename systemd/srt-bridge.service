@@ -50,8 +50,10 @@ Type=simple
 # that arrives WHOLE. That is the blocky, slowly-purple footage in Frigate. Nothing reads this
 # stream to steer (the drive view is the all-intra branch), so delay is cheap here and loss is
 # not. SRT negotiates the larger of the two ends, so raising it here is enough. At 1000 it
-# went 12 minutes, 93300 packets, 22.5% lost in the air and ZERO dropped, at 1.3 Mbps; 900 is
-# the operator's trim of that. The cost: ~750 ms more on everything fed from mediamtx —
+# went 12 minutes, 93300 packets, 22.5% lost in the air and ZERO dropped, at 1.3 Mbps; at 900,
+# 2 dropped of 65850 in 10 minutes; at 800, 21 of 58938 in 8 minutes (worst window 0.8%), so
+# 900 it is — each drop can smear the picture until the next keyframe. The cost: ~750 ms more
+# on everything fed from mediamtx —
 # Frigate, the bridge's WHEP (YOLO, VLM).
 ExecStart=/usr/bin/srt-live-transmit \
   -stats-report-frequency:2000 -statspf:json -fullstats -loglevel:note \

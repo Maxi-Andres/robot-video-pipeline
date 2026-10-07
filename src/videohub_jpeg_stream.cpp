@@ -23,7 +23,6 @@
 
 #include <unitree/robot/go2/video/video_client.hpp>
 #include <unitree/robot/channel/channel_factory.hpp>
-#include <unitree/common/json/json.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -57,24 +56,15 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "[videohub_jpeg_stream] nic=%s max_fps=%.1f\n", nic.c_str(), max_fps);
 
-    // UNICAST DATA, multicast only for discovery. Init(0, nic) gives CycloneDDS the SDK's own
-    // config, which leaves multicast on, so our response reader advertises 239.255.0.1 and the
-    // videohub answers every GetImageSample — a whole JPEG, ~131 KB — to the multicast group.
-    // The robot's internal switch floods multicast to EVERY port, so the IR1101 received all
-    // of it: 92 Mbps on its 100 Mbps Fa0/0/1, blamed for weeks on Unitree firmware. MEASURED
-    // 2026-10-07: pausing this process took the bus from 92 Mbps to 0 within two seconds, and a
-    // probe with this config was answered by unicast (+8500 unicast pkt/s, multicast unchanged).
-    // Same SDK XML plus AllowMulticast=spdp; the G1 runs this binary too and benefits the same.
-    const std::string dds_xml =
-        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><CycloneDDS><Domain Id=\"any\"><General>"
-        "<Interfaces><NetworkInterface name=\"" + nic +
-        "\" priority=\"default\" multicast=\"default\" /></Interfaces>"
-        "<AllowMulticast>spdp</AllowMulticast>"
-        "</General></Domain></CycloneDDS>";
-    unitree::common::JsonMap dds;
-    dds["DomainId"] = unitree::common::Any(0);
-    dds["Config"] = unitree::common::Any(dds_xml);
-    ChannelFactory::Instance()->Init(dds);
+    // The SDK's own DDS config, multicast included — and NOT our unicast-only one, though that
+    // was tried. Every GetImageSample answer is a whole JPEG (~128 KB) and the videohub sends it
+    // to EVERY reader of the response topic, not just the caller; a Unitree service on PC1 has
+    // one that asks for multicast, and the robot's internal switch floods multicast to every
+    // port, the IR1101's included (92 Mbps on its 100 Mbps Fa0/0/1). MEASURED 2026-10-07: with
+    // AllowMulticast=spdp here the videohub answered us by unicast AND kept the multicast copy
+    // for PC1's reader — twice the sending, the flood untouched. What we control is how many
+    // answers there are: see the pacing below.
+    ChannelFactory::Instance()->Init(0, nic);
     go2::VideoClient vc;
     vc.SetTimeout(1.0f);
     vc.Init();
@@ -85,9 +75,24 @@ int main(int argc, char** argv) {
     const long noframe_timeout = getenv("NOFRAME_TIMEOUT_S") ? atol(getenv("NOFRAME_TIMEOUT_S")) : 8;
     time_t last_ok = time(nullptr);
 
+    // Do not ask again until the camera can have a new picture. Every call costs a whole JPEG on
+    // the robot bus (and its multicast copy, see above), new picture or not, and polling flat out
+    // asked ~89 times a second for ~14 new frames — 84% of the bus was repeats. After a NEW frame
+    // wait REPOLL_MS, then poll as before until the next one appears. MEASURED 2026-10-07 on the
+    // Go2 (probe beside the live reader, 20 s each): 0 -> 42.8 calls/s for 14.30 new frames/s;
+    // 50 -> 15.8 calls/s for 14.35 (1.1 calls a frame, none lost); 60 -> 13.5 for 13.50, i.e. it
+    // starts MISSING frames, because the camera's ~70 ms period jitters. 0 restores flat-out.
+    const long repoll_ms = getenv("REPOLL_MS") ? atol(getenv("REPOLL_MS")) : 50;
+    const long repoll_ns = (repoll_ms > 0 && repoll_ms < 1000) ? repoll_ms * 1000000L : 0;
+    long last_new_ns = 0;
+
     std::vector<uint8_t> img, prev;
     long sent = 0, empty = 0;
     while (true) {
+        if (repoll_ns && last_new_ns) {
+            const long wait_ns = last_new_ns + repoll_ns - now_ns();
+            if (wait_ns > 0) nsleep(wait_ns);
+        }
         const long cycle_start = now_ns();
         img.clear();
         int r = vc.GetImageSample(img);
@@ -110,6 +115,7 @@ int main(int argc, char** argv) {
         }
         if (fwrite(img.data(), 1, img.size(), stdout) != img.size()) return 0;
         fflush(stdout);
+        last_new_ns = now_ns();
         prev = img;
         if (++sent % 100 == 0) fprintf(stderr, "[videohub_jpeg_stream] %ld frames\n", sent);
         // Sleep only the REMAINDER of the frame interval, measured from the start of this
