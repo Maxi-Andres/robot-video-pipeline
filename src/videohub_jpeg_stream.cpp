@@ -23,6 +23,7 @@
 
 #include <unitree/robot/go2/video/video_client.hpp>
 #include <unitree/robot/channel/channel_factory.hpp>
+#include <unitree/common/json/json.hpp>
 
 #include <cstdio>
 #include <cstdlib>
@@ -56,7 +57,24 @@ int main(int argc, char** argv) {
 
     fprintf(stderr, "[videohub_jpeg_stream] nic=%s max_fps=%.1f\n", nic.c_str(), max_fps);
 
-    ChannelFactory::Instance()->Init(0, nic);
+    // UNICAST DATA, multicast only for discovery. Init(0, nic) gives CycloneDDS the SDK's own
+    // config, which leaves multicast on, so our response reader advertises 239.255.0.1 and the
+    // videohub answers every GetImageSample — a whole JPEG, ~131 KB — to the multicast group.
+    // The robot's internal switch floods multicast to EVERY port, so the IR1101 received all
+    // of it: 92 Mbps on its 100 Mbps Fa0/0/1, blamed for weeks on Unitree firmware. MEASURED
+    // 2026-10-07: pausing this process took the bus from 92 Mbps to 0 within two seconds, and a
+    // probe with this config was answered by unicast (+8500 unicast pkt/s, multicast unchanged).
+    // Same SDK XML plus AllowMulticast=spdp; the G1 runs this binary too and benefits the same.
+    const std::string dds_xml =
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" ?><CycloneDDS><Domain Id=\"any\"><General>"
+        "<Interfaces><NetworkInterface name=\"" + nic +
+        "\" priority=\"default\" multicast=\"default\" /></Interfaces>"
+        "<AllowMulticast>spdp</AllowMulticast>"
+        "</General></Domain></CycloneDDS>";
+    unitree::common::JsonMap dds;
+    dds["DomainId"] = unitree::common::Any(0);
+    dds["Config"] = unitree::common::Any(dds_xml);
+    ChannelFactory::Instance()->Init(dds);
     go2::VideoClient vc;
     vc.SetTimeout(1.0f);
     vc.Init();
