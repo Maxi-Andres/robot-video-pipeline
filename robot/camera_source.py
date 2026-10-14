@@ -69,7 +69,14 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CAMERAS = ("front", "rs_color", "rs_depth")
+ALL_CAMERAS = ("front", "rs_color", "rs_depth")
+# The cameras THIS robot offers. The Go2 has all three. The G1 has no `rs_color`: its RealSense
+# colour IS its front camera, served by Unitree's videohub_pc4, which owns that node.
+CAMERAS = tuple(c for c in os.environ.get("CAMERAS", ",".join(ALL_CAMERAS)).split(",")
+                if c in ALL_CAMERAS) or ALL_CAMERAS
+# How the depth camera is read (see V4L2Depth): "librealsense" on the Go2, measured; "v4l2" where
+# another process owns part of the RealSense (the G1) or librealsense is not installed.
+DEPTH_BACKEND = os.environ.get("DEPTH_BACKEND", "librealsense")
 
 PORT = int(os.environ.get("CAMERA_PORT", "8094"))
 INITIAL = os.environ.get("CAMERA", "front")
@@ -327,12 +334,35 @@ def _imaging():
     return _np, _cv2
 
 
-def encode_jpeg_422(bgr):
-    """BGR picture -> JPEG with 4:2:2 chroma, the front camera's. See the module docstring for
-    why the subsampling must match; cv2.imencode in OpenCV 4.2 always writes 4:2:0."""
+# PIL's `subsampling` for each luma sampling factor a JPEG can carry.
+_PIL_SAMPLING = {(2, 1): 1, (2, 2): 2, (1, 1): 0}     # 4:2:2, 4:2:0, 4:4:4
+# The front camera's, learnt from its own frames (run() reads it off the first one). The Go2's
+# is 4:2:2, measured 2026-10-14, so that is the default until a front frame has been seen.
+FRONT_SAMPLING = {"422": (2, 1), "420": (2, 2), "444": (1, 1)}.get(
+    os.environ.get("JPEG_SAMPLING", "422"), (2, 1))
+
+
+def learn_front_sampling(jpeg):
+    """Remember the front camera's chroma subsampling from one of its frames. Cheap (a header
+    scan), and it is what keeps the depth picture decodable by the same long-lived decoders."""
+    global FRONT_SAMPLING
+    sampling = jpeg_luma_sampling(jpeg)
+    if sampling in _PIL_SAMPLING and sampling != FRONT_SAMPLING:
+        FRONT_SAMPLING = sampling
+        log(f"front camera JPEGs are {_SAMPLING_NAME[sampling]}; the depth picture matches")
+
+
+_SAMPLING_NAME = {(2, 1): "4:2:2", (2, 2): "4:2:0", (1, 1): "4:4:4"}
+
+
+def encode_jpeg_like_front(bgr):
+    """BGR picture -> JPEG with the SAME chroma subsampling as the front camera's. See the
+    module docstring for why it must match; cv2.imencode in OpenCV 4.2 always writes 4:2:0,
+    hence PIL. The G1's front camera is Unitree's, so it is matched, not assumed."""
     _imaging()
     buf = io.BytesIO()
-    _pil.fromarray(bgr[:, :, ::-1]).save(buf, "JPEG", quality=RS_QUALITY, subsampling=1)
+    _pil.fromarray(bgr[:, :, ::-1]).save(buf, "JPEG", quality=RS_QUALITY,
+                                         subsampling=_PIL_SAMPLING.get(FRONT_SAMPLING, 1))
     return buf.getvalue()
 
 
@@ -444,7 +474,7 @@ class RealSenseDepth:
         finally:
             lib.rs2_release_frame(frames)
         z = raw.view(np.uint16).reshape(h, stride // 2)[:, :w]
-        return encode_jpeg_422(colorize_depth(smooth_depth(z)))
+        return encode_jpeg_like_front(colorize_depth(smooth_depth(z)))
 
     def close(self):
         lib = _lib
@@ -496,6 +526,15 @@ def find_realsense_color_node(sysfs="/sys/class/video4linux"):
     By what it offers, not by number: the D435i registers six nodes and only the colour one
     offers YUYV (depth is Z16, infrared is GREY/Y8I, the odd ones are metadata). The numbers
     move with plug order and with whatever else is on USB."""
+    return _find_realsense_node("YUYV", "colour", sysfs)
+
+
+def find_realsense_depth_node(sysfs="/sys/class/video4linux"):
+    """The /dev/videoN index of the RealSense's depth sensor (the one offering Z16)."""
+    return _find_realsense_node("Z16 ", "depth", sysfs)
+
+
+def _find_realsense_node(fourcc, what, sysfs):
     try:
         names = sorted(os.listdir(sysfs))
     except OSError:
@@ -506,9 +545,9 @@ def find_realsense_color_node(sysfs="/sys/class/video4linux"):
                 name = fh.read()
         except OSError:
             continue
-        if "RealSense" in name and "YUYV" in _node_formats(f"/dev/{node}"):
+        if "RealSense" in name and fourcc in _node_formats(f"/dev/{node}"):
             return int(node[len("video"):])
-    raise CameraError("no RealSense colour node (YUYV) under /dev/video*")
+    raise CameraError(f"no RealSense {what} node ({fourcc.strip()}) under /dev/video*")
 
 
 def realsense_color_cmd(index):
@@ -526,6 +565,115 @@ def realsense_color_cmd(index):
 # A colour pipeline that does not produce a frame in this long is not going to: the device is
 # busy (the G1's videohub owns it) or gone. Measured first frame on the Go2: 0.9 s.
 RS_COLOR_FIRST_FRAME_S = 3.0
+
+
+# --------------------------------------------------------------------------- #
+# rs_depth without librealsense: the depth node straight through V4L2
+# --------------------------------------------------------------------------- #
+VIDIOC_S_FMT = 0xC0D05605                # _IOWR('V', 5, struct v4l2_format), 208 bytes
+VIDIOC_REQBUFS = 0xC0145608              # _IOWR('V', 8, struct v4l2_requestbuffers), 20
+VIDIOC_QUERYBUF = 0xC0585609             # _IOWR('V', 9, struct v4l2_buffer), 88 on 64-bit
+VIDIOC_QBUF = 0xC058560F
+VIDIOC_DQBUF = 0xC0585611
+VIDIOC_STREAMON = 0x40045612
+VIDIOC_STREAMOFF = 0x40045613
+VIDIOC_S_PARM = 0xC0CC5616               # _IOWR('V', 22, struct v4l2_streamparm), 204
+V4L2_MEMORY_MMAP = 1
+FOURCC_Z16 = struct.unpack("<I", b"Z16 ")[0]
+
+
+class V4L2Depth:
+    """The RealSense depth node read directly: set Z16, map 4 buffers, block on each frame.
+
+    WHY A SECOND PATH: librealsense opens the camera as a whole device, and on the G1 Unitree's
+    videohub_pc4 already holds its colour node — this opens ONLY the depth node. It also needs
+    no librealsense at all. MEASURED on the Go2 2026-10-14 (a probe of this same code): 15 fps of
+    full 848x480 frames, values in millimetres (median 914 against librealsense's ~same scene),
+    0% CPU for the capture itself — the read sleeps in the kernel until a frame is ready.
+    The emitter is whatever the camera powers up with (on, by default): librealsense is not
+    there to change it, and the frames came out 88% valid with it.
+
+    Struct offsets are those of a 64-bit kernel (the Jetson's aarch64, and x86_64).
+    """
+
+    def __init__(self):
+        import fcntl
+        import mmap
+        np, _cv2 = _imaging()
+        self._fcntl, self._np = fcntl, np
+        index = int(os.environ.get("RS_DEPTH_DEVICE", "-1"))
+        if index < 0:
+            index = find_realsense_depth_node()
+        self._w, self._h = parse_size(RS_DEPTH_SIZE)
+        self._fd = None
+        self._maps = []
+        try:
+            self._fd = os.open(f"/dev/video{index}", os.O_RDWR | os.O_NONBLOCK)
+            fmt = bytearray(208)
+            struct.pack_into("I", fmt, 0, V4L2_BUF_TYPE_VIDEO_CAPTURE)
+            struct.pack_into("IIII", fmt, 8, self._w, self._h, FOURCC_Z16, 1)
+            fcntl.ioctl(self._fd, VIDIOC_S_FMT, fmt)
+            self._w, self._h = struct.unpack_from("II", fmt, 8)
+            parm = bytearray(204)
+            struct.pack_into("I", parm, 0, V4L2_BUF_TYPE_VIDEO_CAPTURE)
+            struct.pack_into("II", parm, 12, 1, rs_fps(RS_FPS))     # timeperframe = 1/fps
+            fcntl.ioctl(self._fd, VIDIOC_S_PARM, parm)
+            req = bytearray(20)
+            struct.pack_into("III", req, 0, 4, V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_MEMORY_MMAP)
+            fcntl.ioctl(self._fd, VIDIOC_REQBUFS, req)
+            for i in range(struct.unpack_from("I", req, 0)[0]):
+                buf = self._buf(i)
+                fcntl.ioctl(self._fd, VIDIOC_QUERYBUF, buf)
+                offset, length = struct.unpack_from("I", buf, 64)[0], struct.unpack_from("I", buf, 72)[0]
+                self._maps.append(mmap.mmap(self._fd, length, mmap.MAP_SHARED, mmap.PROT_READ,
+                                            offset=offset))
+                fcntl.ioctl(self._fd, VIDIOC_QBUF, buf)
+            fcntl.ioctl(self._fd, VIDIOC_STREAMON, struct.pack("I", V4L2_BUF_TYPE_VIDEO_CAPTURE))
+        except OSError as exc:
+            self.close()
+            raise CameraError(f"/dev/video{index}: {exc.strerror or exc}") from None
+
+    @staticmethod
+    def _buf(index):
+        b = bytearray(88)
+        struct.pack_into("II", b, 0, index, V4L2_BUF_TYPE_VIDEO_CAPTURE)
+        struct.pack_into("I", b, 60, V4L2_MEMORY_MMAP)
+        return b
+
+    def read(self, timeout):
+        if not select.select([self._fd], [], [], timeout)[0]:
+            return None
+        b = self._buf(0)
+        try:
+            self._fcntl.ioctl(self._fd, VIDIOC_DQBUF, b)
+        except BlockingIOError:
+            return None
+        except OSError as exc:
+            raise CameraError(f"depth node: {exc.strerror or exc}") from None
+        index, _type, used = struct.unpack_from("III", b, 0)
+        need = self._w * self._h * 2
+        z = None
+        if used >= need:
+            z = self._np.frombuffer(self._maps[index], self._np.uint16,
+                                    self._w * self._h).reshape(self._h, self._w).copy()
+        self._fcntl.ioctl(self._fd, VIDIOC_QBUF, b)
+        if z is None:
+            return None                              # a short frame: skip it, never show half
+        return encode_jpeg_like_front(colorize_depth(smooth_depth(z)))
+
+    def close(self):
+        if self._fd is None:
+            return
+        try:
+            self._fcntl.ioctl(self._fd, VIDIOC_STREAMOFF,
+                              struct.pack("I", V4L2_BUF_TYPE_VIDEO_CAPTURE))
+        except OSError:
+            pass
+        for m in self._maps:
+            m.close()
+        self._maps = []
+        os.close(self._fd)
+        self._fd = None
 
 
 # --------------------------------------------------------------------------- #
@@ -580,7 +728,7 @@ def open_camera(name, front_cmd):
     if name == "front":
         return CommandCamera(front_cmd, "front")
     if name == "rs_depth":
-        return RealSenseDepth()
+        return V4L2Depth() if DEPTH_BACKEND == "v4l2" else RealSenseDepth()
     index = int(os.environ.get("RS_COLOR_DEVICE", "-1"))
     if index < 0:
         index = find_realsense_color_node()
@@ -623,6 +771,8 @@ def run(front_cmd, out):
                 SELECTOR.done(failed, current, f"{failed}: {exc}")
                 continue
             if frame:
+                if current == "front":
+                    learn_front_sampling(frame)
                 out.write(frame)
                 out.flush()
     except BrokenPipeError:
