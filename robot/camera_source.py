@@ -73,15 +73,19 @@ CAMERAS = ("front", "rs_color", "rs_depth")
 
 PORT = int(os.environ.get("CAMERA_PORT", "8094"))
 INITIAL = os.environ.get("CAMERA", "front")
-# The capture cap that already bounds the robot's own camera. The RealSense only offers
-# 6, 15 and 30 fps at these sizes, so it is rounded UP to one of those and mjpeg_server's
-# gates do the rest — rounding down would cap the picture below what was asked for.
-MAXFPS = float(os.environ.get("MAXFPS", "15") or 0)
+# The RealSense's own rate, NOT the robot camera's MAXFPS. It used to follow MAXFPS, and the Go2
+# runs MAXFPS=0 ("as fast as the videohub answers", which tops out at ~14), so the RealSense
+# went to 30 fps — MEASURED 2026-10-14: the drive branch sends every frame, and depth at 30 fps
+# put 4.5 Mbps on an LTE uplink with ~1 Mbps to spare. 15 matches the front camera. The sensor
+# only offers 6, 15 and 30 here, so the value is rounded UP to one of those.
+RS_FPS = float(os.environ.get("RS_FPS", "15") or 0)
 LIBRS = os.environ.get("LIBREALSENSE",
                        "/opt/ros/noetic/lib/aarch64-linux-gnu/librealsense2.so")
 RS_COLOR_SIZE = os.environ.get("RS_COLOR_SIZE", "1280x720")
-# 848x480 is the D435's optimal depth resolution: the most valid pixels per frame.
+# 848x480 is the D435's optimal depth resolution: the most valid pixels per frame. That is what
+# is CAPTURED; what is SENT is DEPTH_OUT_SIZE, see smooth_depth().
 RS_DEPTH_SIZE = os.environ.get("RS_DEPTH_SIZE", "848x480")
+DEPTH_OUT_SIZE = os.environ.get("DEPTH_OUT_SIZE", "424x240")
 RS_QUALITY = int(os.environ.get("RS_JPEG_QUALITY", "85"))
 # OpenCV's thread pool is sized for the machine, not for this process's share of it. Same rule
 # and same default as mjpeg_server's MJPEG_CV_THREADS. Used by the depth colouriser only.
@@ -344,6 +348,30 @@ def jpeg_luma_sampling(jpeg):
     return None
 
 
+def smooth_depth(z, size=None):
+    """Raw depth -> a picture that is cheap to send: smaller, holes filled, speckle removed.
+
+    The raw D435 frame is peppered with single pixels and small blobs of "no reading", and those
+    black specks next to saturated colours are the most expensive thing an intra encoder can be
+    given. MEASURED on the Go2 2026-10-14, real frames through the real drive encoder (640x360,
+    QP 38): raw 17.7 KB a frame, this 7.1 KB — 2.12 -> 0.86 Mbps at 15 fps, the same as the front
+    camera — and 26 -> 9.6 ms of CPU a frame, because the colourise and the JPEG get smaller too.
+
+      * NEAREST downscale, never an average: averaging a 0.5 m edge with a 3 m wall invents a
+        1.75 m surface that is not there.
+      * a hole takes its neighbours' value (dilate, twice: up to ~4 px). Larger holes stay black,
+        so a real "cannot see" — glass, black cloth, too close — still shows as one.
+      * median 5 removes what is left of the speckle without moving edges.
+    """
+    _np, cv2 = _imaging()
+    w, h = parse_size(size or DEPTH_OUT_SIZE)
+    z = cv2.resize(z, (w, h), interpolation=cv2.INTER_NEAREST)
+    kernel = _np.ones((5, 5), _np.uint8)
+    for _ in range(2):
+        z = _np.where(z == 0, cv2.dilate(z, kernel), z)
+    return cv2.medianBlur(z, 5)
+
+
 def colorize_depth(z, lo_mm=DEPTH_MIN_MM, hi_mm=DEPTH_MAX_MM):
     """uint16 millimetres -> BGR picture with a legend. 0 (no reading) stays black.
 
@@ -388,7 +416,7 @@ class RealSenseDepth:
             self._cfg = _call(lib.rs2_create_config)
             w, h = parse_size(RS_DEPTH_SIZE)
             _call(lib.rs2_config_enable_stream, self._cfg, RS2_STREAM_DEPTH, -1, w, h,
-                  RS2_FORMAT_Z16, rs_fps(MAXFPS))
+                  RS2_FORMAT_Z16, rs_fps(RS_FPS))
             self._profile = _call(lib.rs2_pipeline_start_with_config, self._pipe, self._cfg)
         except CameraError:
             self.close()
@@ -415,7 +443,8 @@ class RealSenseDepth:
                 lib.rs2_release_frame(f)
         finally:
             lib.rs2_release_frame(frames)
-        return encode_jpeg_422(colorize_depth(raw.view(np.uint16).reshape(h, stride // 2)[:, :w]))
+        z = raw.view(np.uint16).reshape(h, stride // 2)[:, :w]
+        return encode_jpeg_422(colorize_depth(smooth_depth(z)))
 
     def close(self):
         lib = _lib
@@ -490,7 +519,7 @@ def realsense_color_cmd(index):
     w, h = parse_size(RS_COLOR_SIZE)
     return ["gst-launch-1.0", "-q",
             "v4l2src", f"device=/dev/video{index}", "!",
-            f"video/x-raw,format=YUY2,width={w},height={h},framerate={rs_fps(MAXFPS)}/1", "!",
+            f"video/x-raw,format=YUY2,width={w},height={h},framerate={rs_fps(RS_FPS)}/1", "!",
             "jpegenc", f"quality={RS_QUALITY}", "!", "fdsink", "fd=1"]
 
 
