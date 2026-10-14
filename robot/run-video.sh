@@ -107,7 +107,7 @@ NIC="${NIC:-eth0}"
 # depth colouriser and mjpeg_server's cv2 resize fallback, which loads numpy the first time the
 # hardware resize gives up — and would then quietly take three and a half cores from the robot.
 export OPENBLAS_NUM_THREADS=1
-# Exported: camera_source reads both. MAXFPS also sets the RealSense rate.
+# Exported for camera_source. The RealSense has its own rate, RS_FPS (default 15), on purpose.
 export MAXFPS="${MAXFPS:-15}"
 export CAMERA="${CAMERA:-front}"
 export CAMERA_PORT="${CAMERA_PORT:-8094}"

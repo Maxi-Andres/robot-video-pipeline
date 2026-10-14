@@ -353,6 +353,22 @@ def test_the_sampling_reader_tells_422_from_420():
     assert camera_source.jpeg_luma_sampling(b"\xff\xd8") is None
 
 
+def test_depth_smoothing_fills_specks_but_keeps_real_holes_and_edges():
+    """Specks of "no reading" are what made depth cost 2.5x the bytes of the front camera.
+    They must go — but a real blind area must stay black, and an edge must not be averaged
+    into a surface that is not there."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    z = np.full((240, 424), 3000, np.uint16)
+    z[:, :200] = 500                        # a near object, edge at x=200
+    z[50, 50] = z[120, 300] = 0             # specks
+    z[150:230, 320:420] = 0                 # a real blind area, 80x100 px
+    out = camera_source.smooth_depth(z, "424x240")
+    assert out[50, 50] == 500 and out[120, 300] == 3000, "specks were not filled"
+    assert (out[180:200, 360:380] == 0).all(), "a real blind area was painted over"
+    assert set(np.unique(out[:100, 190:210])) <= {500, 3000}, "the edge was averaged"
+
+
 @pytest.mark.parametrize("maxfps, expect", [(0, 30), (30, 30), (15, 15), (10, 15), (5, 6)])
 def test_the_realsense_rate_rounds_up_to_a_supported_one(maxfps, expect):
     """The D435 offers 6/15/30 fps. Rounding DOWN would cap the picture below the request."""
