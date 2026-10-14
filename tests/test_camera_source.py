@@ -341,7 +341,7 @@ def test_the_depth_picture_is_encoded_422():
     pytest.importorskip("cv2")
     pytest.importorskip("PIL")
     z = np.full((480, 848), 1500, np.uint16)
-    jpeg = camera_source.encode_jpeg_422(camera_source.colorize_depth(z))
+    jpeg = camera_source.encode_jpeg_like_front(camera_source.colorize_depth(z))
     assert camera_source.jpeg_luma_sampling(jpeg) == (2, 1), "not 4:2:2"
 
 
