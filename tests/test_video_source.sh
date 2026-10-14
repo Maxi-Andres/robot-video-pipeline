@@ -58,6 +58,9 @@ check  "encodes H.264 in hardware" "nvv4l2h264enc"        "$line"
 check  "bitrate is filled in"      "bitrate=100000"       "$line"
 refute "no empty bitrate"          "bitrate= "            "$line"
 check  "SPS/PPS on every keyframe" "config-interval=-1"   "$line"
+# Pinned even with WIDTH/HEIGHT unset: camera_source switches between 1080p, 720p and 480p, and
+# an encoder that follows those changes breaks Frigate's playback of the recording.
+check  "NVR size pinned by default" "width=1920,height=1080" "$line"
 
 echo
 echo "SOURCE=multicast (the robot's own H.264, passthrough)"
