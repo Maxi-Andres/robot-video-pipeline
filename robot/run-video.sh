@@ -30,6 +30,9 @@
 # Env:
 #   SOURCE    jpeg (default) or multicast       — see the SOURCE block below
 #   NIC       robot-internal interface for DDS   (default eth0)
+#   CAMERA    front (default), rs_color or rs_depth — the camera `jpeg` starts on. Switchable
+#             at runtime through the relay; see robot/camera_source.py
+#   CAMERA_PORT  localhost control port of camera_source (default 8094)
 #   MAXFPS    cap the capture rate               (default 15 — bounds field bandwidth)
 #   PUBLISH_HOST  where mediamtx listens        (required)
 #   PROTO         rtmp (default) or srt          (srt needs a newer libsrt on the robot)
@@ -98,7 +101,16 @@ MCAST_ADDR="${MCAST_ADDR:-230.1.1.1}"
 MCAST_PORT="${MCAST_PORT:-1720}"
 
 NIC="${NIC:-eth0}"
-MAXFPS="${MAXFPS:-15}"
+# numpy's BLAS on the Jetson is OpenBLAS-pthread, and its worker threads SPIN: MEASURED on the
+# Go2 2026-10-14, a Python process that only imports numpy and sleeps costs 367% of a core;
+# with this set, 0%. Nothing in this pipeline does linear algebra. It covers camera_source's
+# depth colouriser and mjpeg_server's cv2 resize fallback, which loads numpy the first time the
+# hardware resize gives up — and would then quietly take three and a half cores from the robot.
+export OPENBLAS_NUM_THREADS=1
+# Exported: camera_source reads both. MAXFPS also sets the RealSense rate.
+export MAXFPS="${MAXFPS:-15}"
+export CAMERA="${CAMERA:-front}"
+export CAMERA_PORT="${CAMERA_PORT:-8094}"
 PUBLISH_HOST="${PUBLISH_HOST:-${SRT_HOST:?set PUBLISH_HOST to the machine running mediamtx}}"
 PROTO="${PROTO:-rtmp}"
 STREAM="${STREAM:-robot}"
@@ -369,10 +381,16 @@ while [ "$running" = 1 ]; do
     # chain is the one supervised command.
     encode_and_publish || true
   else
-    echo "[robot-video] starting capture -> HW encode -> $PROTO publish"
-    # videohub_jpeg_stream exits after ~8 s without frames (robot's camera service down), which
-    # EOFs the pipeline; the loop then republishes cleanly once video is back.
-    ./videohub_jpeg_stream "$NIC" "$MAXFPS" | "${TEE[@]}" | encode_and_publish || true
+    echo "[robot-video] starting capture -> HW encode -> $PROTO publish (camera: $CAMERA)"
+    # camera_source picks WHICH camera feeds the chain — the robot's own (videohub_jpeg_stream,
+    # the command given to it here) or the RealSense — and switches at runtime without
+    # rebuilding anything downstream. Only one camera is ever open.
+    #
+    # videohub_jpeg_stream exits after ~8 s without frames (robot's camera service down).
+    # camera_source restarts it in place, so that no longer EOFs the pipeline; this loop is
+    # now for camera_source itself or the tee dying.
+    python3 "$(dirname "$0")/camera_source.py" ./videohub_jpeg_stream "$NIC" "$MAXFPS" \
+      | "${TEE[@]}" | encode_and_publish || true
   fi
 
   [ "$running" = 1 ] && { echo "[robot-video] pipeline ended; retry in 3s" >&2; sleep 3; }

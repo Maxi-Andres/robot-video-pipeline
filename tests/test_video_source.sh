@@ -16,7 +16,7 @@ BASE=$(mktemp -d); trap 'rm -rf "$BASE"' EXIT
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 
 mkdir -p "$BASE/robot" "$BASE/bin"
-cp "$REPO/robot/run-video.sh" "$BASE/robot/"
+cp "$REPO/robot/run-video.sh" "$REPO/robot/camera_source.py" "$BASE/robot/"
 printf '#!/bin/sh\nsleep 30\n' >"$BASE/videohub_jpeg_stream"; chmod +x "$BASE/videohub_jpeg_stream"
 # The stub records the pipeline it was handed and then blocks, so the supervisor sees a healthy
 # encoder and the script does not spin.

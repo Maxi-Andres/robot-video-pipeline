@@ -18,7 +18,7 @@ trap 'rm -rf "$BASE"' EXIT
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 
 mkdir -p "$BASE/robot" "$BASE/bin"
-cp "$REPO/robot/run-video.sh" "$BASE/robot/"
+cp "$REPO/robot/run-video.sh" "$REPO/robot/camera_source.py" "$BASE/robot/"
 
 # Stub capture: never exits on its own, so anything that ends the run came from the encoder.
 cat >"$BASE/videohub_jpeg_stream" <<'EOF'
