@@ -31,8 +31,17 @@ TWO READ PATHS, ONE PER STREAM, measured on the Go2 2026-10-14:
             even list the node) reads that format. librealsense 2.50 is already installed with
             ros-noetic-librealsense2, so nothing has to be installed on the robot.
             Cost: 32% of a core at 15.3 fps, nearly all of it the colourise and the JPEG.
-    colour  GStreamer: v4l2src -> nvvidconv -> nvjpegenc, the JPEG made by the NVJPG engine.
-            Cost: 2.3% of a core at 13.8 fps — the CPU only moves buffers.
+    colour  GStreamer: v4l2src (YUY2) -> jpegenc, straight from the sensor's own format.
+
+EVERY JPEG HERE IS 4:2:2, because the front camera's are, and that is not a detail. The
+downstream decoders (nvjpegdec in the NVR encoder and in the drive branch) are long-lived and
+renegotiate when the input changes; a change of SIZE they absorb, a change of CHROMA
+SUBSAMPLING they do not. MEASURED on the Go2 2026-10-14 with the real front JPEG: front (4:2:2)
+-> RealSense at 4:2:0 -> front again gave wrong colours on the RealSense part and a solid green
+picture from then on — in the recording, until the encoder restarted. The same sequence with
+the RealSense at 4:2:2: every frame right. So the colour path uses software jpegenc fed YUY2
+(4:2:2 in, 4:2:2 out) and NOT the NVJPG engine, which only encodes 4:2:0; and the depth path
+encodes with PIL, because OpenCV 4.2 cannot choose the subsampling at all.
 
 AND ONE TRAP THAT IS NOT ABOUT CAMERAS: on this Jetson, `import numpy` ALONE costs 367% of a
 core, forever. The system BLAS is OpenBLAS-pthread, and its worker threads spin on sched_yield
@@ -42,16 +51,18 @@ imported numpy and slept. OPENBLAS_NUM_THREADS=1 takes it to 0%; nothing here do
 algebra, so the pool buys nothing. run-video.sh exports it for every process it starts, and
 _imaging() sets it too, for a manual run.
 
-Standard library only for `front` and `rs_color`. numpy and cv2 are imported the first time
-the depth camera is opened, so a robot without them still runs everything else as before.
+Standard library only for `front` and `rs_color`. numpy, cv2 and PIL are imported the first
+time the depth camera is opened, so a robot without them still runs everything else.
 """
 from __future__ import annotations
 
 import ctypes
+import io
 import json
 import os
 import select
 import signal
+import struct
 import subprocess
 import sys
 import threading
@@ -292,10 +303,11 @@ def _call(fn, *args):
 
 _np = None
 _cv2 = None
+_pil = None
 
 
 def _imaging():
-    global _np, _cv2
+    global _np, _cv2, _pil
     if _cv2 is None:
         # BEFORE the import: OpenBLAS reads it once, when numpy loads it. See the module
         # docstring — without it this process burns ~3.7 cores doing nothing.
@@ -303,11 +315,33 @@ def _imaging():
         try:
             import cv2
             import numpy
+            from PIL import Image
         except ImportError as exc:
-            raise CameraError(f"the RealSense cameras need numpy and cv2: {exc}") from None
+            raise CameraError(f"the depth camera needs numpy, cv2 and PIL: {exc}") from None
         cv2.setNumThreads(CV_THREADS)
-        _np, _cv2 = numpy, cv2
+        _np, _cv2, _pil = numpy, cv2, Image
     return _np, _cv2
+
+
+def encode_jpeg_422(bgr):
+    """BGR picture -> JPEG with 4:2:2 chroma, the front camera's. See the module docstring for
+    why the subsampling must match; cv2.imencode in OpenCV 4.2 always writes 4:2:0."""
+    _imaging()
+    buf = io.BytesIO()
+    _pil.fromarray(bgr[:, :, ::-1]).save(buf, "JPEG", quality=RS_QUALITY, subsampling=1)
+    return buf.getvalue()
+
+
+def jpeg_luma_sampling(jpeg):
+    """(h, v) sampling factors of the first component: (2, 1) is 4:2:2, (2, 2) is 4:2:0.
+    None if no SOF is found. Used by the tests to hold the contract above."""
+    i = 2
+    while i + 4 <= len(jpeg) and jpeg[i] == 0xFF:
+        marker = jpeg[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            return jpeg[i + 11] >> 4, jpeg[i + 11] & 15
+        i += 2 + struct.unpack(">H", jpeg[i + 2:i + 4])[0]
+    return None
 
 
 def colorize_depth(z, lo_mm=DEPTH_MIN_MM, hi_mm=DEPTH_MAX_MM):
@@ -362,7 +396,7 @@ class RealSenseDepth:
 
     def read(self, timeout):
         lib = _lib
-        np, cv2 = _imaging()
+        np, _cv2 = _imaging()
         frames = _P()
         if not _call(lib.rs2_pipeline_try_wait_for_frames, self._pipe, ctypes.byref(frames),
                      int(timeout * 1000)):
@@ -381,9 +415,7 @@ class RealSenseDepth:
                 lib.rs2_release_frame(f)
         finally:
             lib.rs2_release_frame(frames)
-        img = colorize_depth(raw.view(np.uint16).reshape(h, stride // 2)[:, :w])
-        ok, jpeg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, RS_QUALITY])
-        return jpeg.tobytes() if ok else None
+        return encode_jpeg_422(colorize_depth(raw.view(np.uint16).reshape(h, stride // 2)[:, :w]))
 
     def close(self):
         lib = _lib
@@ -451,16 +483,15 @@ def find_realsense_color_node(sysfs="/sys/class/video4linux"):
 
 
 def realsense_color_cmd(index):
-    """The RealSense colour sensor as a JPEG stream, captured and encoded by GStreamer.
+    """The RealSense colour sensor as a 4:2:2 JPEG stream, captured and encoded by GStreamer.
 
-    nvvidconv moves the picture into NVMM and nvjpegenc encodes it on the NVJPG engine, the
-    same hardware mjpeg_server's resize uses: the CPU only shuffles buffers."""
+    jpegenc fed YUY2 keeps the sensor's 4:2:2 as it is. NOT nvjpegenc: the NVJPG engine only
+    takes I420/NV12, i.e. writes 4:2:0, and that is what broke the recording (module docstring)."""
     w, h = parse_size(RS_COLOR_SIZE)
     return ["gst-launch-1.0", "-q",
             "v4l2src", f"device=/dev/video{index}", "!",
             f"video/x-raw,format=YUY2,width={w},height={h},framerate={rs_fps(MAXFPS)}/1", "!",
-            "nvvidconv", "!", "video/x-raw(memory:NVMM),format=I420", "!",
-            "nvjpegenc", f"quality={RS_QUALITY}", "!", "fdsink", "fd=1"]
+            "jpegenc", f"quality={RS_QUALITY}", "!", "fdsink", "fd=1"]
 
 
 # A colour pipeline that does not produce a frame in this long is not going to: the device is

@@ -325,6 +325,34 @@ def test_depth_colours_near_red_far_blue_and_no_reading_black():
     assert img[100, 700].tolist() == [0, 0, 0]
 
 
+def test_the_colour_pipeline_writes_422_like_the_front_camera():
+    """The defect: nvjpegenc, which can only write 4:2:0. Switching front (4:2:2) -> RealSense
+    (4:2:0) -> front left the recording solid green until the encoder restarted (measured on the
+    Go2 2026-10-14). jpegenc fed YUY2 keeps 4:2:2."""
+    cmd = " ".join(camera_source.realsense_color_cmd(4))
+    assert "format=YUY2" in cmd
+    assert "! jpegenc" in cmd
+    assert "nvjpegenc" not in cmd and "I420" not in cmd and "NV12" not in cmd
+
+
+def test_the_depth_picture_is_encoded_422():
+    """Same contract on the depth path: cv2.imencode in OpenCV 4.2 always writes 4:2:0."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    pytest.importorskip("PIL")
+    z = np.full((480, 848), 1500, np.uint16)
+    jpeg = camera_source.encode_jpeg_422(camera_source.colorize_depth(z))
+    assert camera_source.jpeg_luma_sampling(jpeg) == (2, 1), "not 4:2:2"
+
+
+def test_the_sampling_reader_tells_422_from_420():
+    sof = lambda h, v: (b"\xff\xd8" + b"\xff\xc0\x00\x11\x08\x00\x10\x00\x10\x03"  # noqa: E731
+                        + bytes([1, (h << 4) | v, 0, 2, 0x11, 1, 3, 0x11, 1]))
+    assert camera_source.jpeg_luma_sampling(sof(2, 1)) == (2, 1)
+    assert camera_source.jpeg_luma_sampling(sof(2, 2)) == (2, 2)
+    assert camera_source.jpeg_luma_sampling(b"\xff\xd8") is None
+
+
 @pytest.mark.parametrize("maxfps, expect", [(0, 30), (30, 30), (15, 15), (10, 15), (5, 6)])
 def test_the_realsense_rate_rounds_up_to_a_supported_one(maxfps, expect):
     """The D435 offers 6/15/30 fps. Rounding DOWN would cap the picture below the request."""
