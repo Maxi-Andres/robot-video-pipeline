@@ -42,7 +42,7 @@
 #   BITRATE       H.264 bitrate in bits/s        (default 2000000)
 #   CONTROL_RATE  1 = CBR (default), 0 = VBR      (VBR ignores BITRATE in practice)
 #   LATENCY       SRT latency budget in ms       (default 300; raise on satellite links)
-#   WIDTH/HEIGHT  scale before encoding          (empty = native 1920x1080)
+#   WIDTH/HEIGHT  NVR picture size              (empty = 1920x1080, FIXED whatever the camera)
 #   IDR_FRAMES    keyframe interval in frames    (default 15 = 1/s at 15fps; lower = faster
 #                                                 join for a new viewer, more bitrate)
 #   MJPEG_ENABLE  1 (default) = also serve the raw JPEGs over HTTP for the live view
@@ -133,11 +133,17 @@ export MJPEG_QUALITY="${MJPEG_QUALITY:-75}"
 
 # Scaling happens on the GPU (nvvidconv), so it costs the encoder less work AND less
 # bitrate for the same quality — a real latency knob, not just a bandwidth one.
-if [ -n "$WIDTH" ] && [ -n "$HEIGHT" ]; then
-  SCALE="! video/x-raw(memory:NVMM),width=$WIDTH,height=$HEIGHT "
-else
-  SCALE=""
-fi
+#
+# The size is ALWAYS pinned, never left to follow the camera. With camera_source switching
+# between 1080p, 720p and 480p, an unpinned encoder follows each change and writes a new
+# resolution in the middle of the recording — MEASURED 2026-10-14: Frigate's player showed dark
+# frames with coloured edges from the first switch on, the look of P-frames decoded against the
+# wrong reference. Pinned, the encoder never sees a change: nvvidconv absorbs it on the GPU
+# (6 of 6 runs over six size changes, every frame out at the pinned size). 1920x1080 is what
+# the front camera already sends and what Frigate's `go2` camera declares.
+WIDTH="${WIDTH:-1920}"
+HEIGHT="${HEIGHT:-1080}"
+SCALE="! video/x-raw(memory:NVMM),width=$WIDTH,height=$HEIGHT "
 
 # There is no JPEG stream to tee in `multicast` — the robot hands us H.264 directly, so the
 # MJPEG live view simply does not exist on that source. Say so instead of failing obscurely.

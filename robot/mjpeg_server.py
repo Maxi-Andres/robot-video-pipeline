@@ -774,16 +774,19 @@ class H264Encoder:
 
     def __init__(self):
         self._proc = None
-        self._key = None            # (width, height, qp, src_w, src_h) the child was built for
+        self._key = None            # (width, height, qp) the child was built for
         self._reader = AuReader()
         self._lock = threading.Lock()
         self._fails = 0
         self._dead = False
         self._first = True
 
-    def _spawn(self, width, height, qp, src_w, src_h):
+    def _spawn(self, width, height, qp):
         caps = f"video/x-raw(memory:NVMM),width={width},height={height}"
-        cmd = ["gst-launch-1.0", "-q",
+        # --no-fault: on a SIGSEGV gst-launch otherwise prints "Spinning. Please run 'gdb ...'"
+        # and waits for a debugger forever, so the crash only surfaced as a 2.5 s timeout.
+        # Same fix, same reason, as the NVR encoder in run-video.sh.
+        cmd = ["gst-launch-1.0", "-q", "--no-fault",
                "fdsrc", "fd=0", "!", "jpegparse", "!", "nvjpegdec", "!", "nvvidconv", "!",
                caps, "!",
                "nvv4l2h264enc",
@@ -805,7 +808,7 @@ class H264Encoder:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, bufsize=0)
         threading.Thread(target=drain_stderr, args=(proc, "h264"), daemon=True).start()
-        self._proc, self._key, self._first = proc, (width, height, qp, src_w, src_h), True
+        self._proc, self._key, self._first = proc, (width, height, qp), True
         self._reader = AuReader()
         return proc
 
@@ -813,12 +816,19 @@ class H264Encoder:
         """One JPEG in, one access unit out (or None if the hardware path is unusable)."""
         if self._dead:
             return None
-        src_w, src_h = _jpeg_size(jpeg)
+        src_w, _src_h = _jpeg_size(jpeg)
         if not src_w:
             return None
         with self._lock:
             try:
-                key = (width, height, qp, src_w, src_h)
+                # The SOURCE size is deliberately not part of the key. The output caps are fixed,
+                # so nvjpegdec and nvvidconv renegotiate a new input size inside the running
+                # child — MEASURED on the Go2 2026-10-14: one child, 1080p -> 720p -> 480p ->
+                # 1080p, 120 frames in, 120 out, all 640x360. Respawning instead is what broke
+                # every camera switch (robot/camera_source.py): the fresh nvv4l2h264enc died
+                # with SIGSEGV or "double free" several times in a row, seconds of no drive
+                # view each time — and three in a row disables this branch for good.
+                key = (width, height, qp)
                 if self._proc is None or self._key != key or self._proc.poll() is not None:
                     if self._proc is not None:
                         stop_child(self._proc, "h264")
