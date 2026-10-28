@@ -21,11 +21,20 @@ webrtcAddress: :8889
 # The page derives the WHEP URL from its own origin, so on https it asks for https — and even
 # if it asked for http, a browser refuses mixed content from a secure page. Without this the
 # H.264 transport switch shows "connecting" and falls straight back to MJPEG, which is exactly
-# what it did. Same self-signed pair the rest of this stack uses; a browser needs the
-# exception accepted once per PORT, so visit https://<host>:8889/ and accept it.
+# what it did. Same self-signed pair the rest of this stack uses. Since 2026-10-28 Pilot
+# reaches it on loopback (POST /api/whep/{robot}), so no browser has to accept it any more.
 webrtcEncryption: yes
 webrtcServerKey: auto.key
 webrtcServerCert: auto.crt
+# Viewers on the internet (Pilot at https://pilot.silk-technologies.com, 2026-10-28). The
+# offer reaches us through Pilot (its /api/whep); the video itself goes from here straight to
+# the browser, so the candidates must include an address reachable from outside: the office's
+# public IP, with UDP and TCP 8189 forwarded to this machine on the router. TCP is for
+# networks that block UDP. Only ICE/DTLS listens there: nothing answers without the
+# credentials of an offer Pilot let through.
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+webrtcAdditionalHosts: [201.216.197.132]
 
 # Unused ingress/servers off.
 rtmp: yes
