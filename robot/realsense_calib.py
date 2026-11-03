@@ -10,9 +10,17 @@ a depth snapshot into metres (AI-VL-core/src/perception3d.py); for that it needs
 extrinsics). Every D435 carries its own, written at the factory; until this has been read the
 PC uses the data sheet's values and says "nominal" on every answer.
 
-Only QUERIES the camera — no stream is started, so it runs next to Unitree's videohub_pc4, which
-holds the colour node. Reads through pyrealsense2 if it is installed, otherwise through the same
-librealsense C library camera_source loads (LIBREALSENSE, or the usual install paths).
+WARNING — ON THE G1 IT PROBABLY TAKES THE COLOUR CAMERA DOWN. It only queries (no stream is
+started), and that was assumed to be harmless next to Unitree's videohub_pc4, which holds the
+colour node. It was not checked first, and on 2026-11-03 the one run on the G1 was followed, the
+same minute, by videohub_pc4 dying, being respawned, and delivering no frames until PC2 was
+rebooted. librealsense takes the whole device, not one node — the reason camera_source reads the
+G1's depth through V4L2 (video.g1.env.example, DEPTH_BACKEND). The calibration is per camera and
+already saved (AI-VL-core/config/g1_d435_calibration.json): run this again only for a NEW camera,
+with the robot not in use, and reboot PC2 afterwards.
+
+Reads through pyrealsense2 if it is installed, otherwise through the same librealsense C library
+camera_source loads (LIBREALSENSE, or the usual install paths).
 
 The output: {"depth": {width, height, fx, fy, ppx, ppy}, "color": {...},
 "depth_to_color": {"rotation": 9 floats ROW-major, "translation": 3 floats, metres}, ...}.
