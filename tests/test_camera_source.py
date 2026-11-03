@@ -373,3 +373,124 @@ def test_depth_smoothing_fills_specks_but_keeps_real_holes_and_edges():
 def test_the_realsense_rate_rounds_up_to_a_supported_one(maxfps, expect):
     """The D435 offers 6/15/30 fps. Rounding DOWN would cap the picture below the request."""
     assert camera_source.rs_fps(maxfps) == expect
+
+
+# --------------------------------------------------------------------------- #
+# GET /depth — millimetres on request
+# --------------------------------------------------------------------------- #
+def test_depth_snapshots_are_off_unless_the_robot_turns_them_on(source):
+    """The defect: a ~0.5 MB picture reachable on the Go2, whose uplink is a shared LTE SIM.
+    Off is the default; only the G1's video.env turns it on."""
+    _proc, url = source
+    try:
+        urllib.request.urlopen(url.replace("/camera", "/depth"), timeout=5)
+        pytest.fail("a depth snapshot was served with DEPTH_SNAPSHOT unset")
+    except urllib.error.HTTPError as exc:
+        assert exc.code == 404
+        assert "DEPTH_SNAPSHOT" in json.loads(exc.read())["error"]
+
+
+class _FakeDepth:
+    """A depth reader: hands out the given frames, records that it was closed."""
+
+    def __init__(self, frames):
+        self.frames = list(frames)
+        self.closed = False
+
+    def read_raw(self, _timeout):
+        return self.frames.pop(0) if self.frames else None
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def tap(monkeypatch):
+    t = camera_source.DepthTap()
+    monkeypatch.setattr(camera_source, "DEPTH_TAP", t)
+    return t
+
+
+def test_the_median_ignores_holes_and_drops_one_off_readings():
+    """The defects: a 0 ("no reading") pulling a median towards the camera, and a single
+    speckle frame becoming a surface the grasp reaches for."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    a = np.array([[1000, 0, 500]], np.uint16)
+    b = np.array([[1010, 0, 0]], np.uint16)
+    c = np.array([[0, 700, 0]], np.uint16)
+    z = camera_source.median_depth([a, b, c])
+    assert z[0, 0] == 1005          # two readings out of three: their median, not 670
+    assert z[0, 1] == 0             # seen once: speckle, stays "no reading"
+    assert z[0, 2] == 0
+
+
+def test_the_snapshot_is_16_bit_millimetres_exactly(monkeypatch, tap):
+    """The defect: depth leaving the robot as colours or 8 bits, i.e. not a distance."""
+    np = pytest.importorskip("numpy")
+    cv2 = pytest.importorskip("cv2")
+    z = np.full((4, 6), 1234, np.uint16)
+    z[0, 0] = 65000
+    cam = _FakeDepth([z] * 7)
+    monkeypatch.setattr(camera_source, "open_depth", lambda tap=None: cam)
+    png, info = camera_source.depth_snapshot(5)
+    back = cv2.imdecode(np.frombuffer(png, np.uint8), cv2.IMREAD_UNCHANGED)
+    assert back.dtype == np.uint16 and (back == z).all()
+    assert info["frames"] == 5 and info["width"] == 6 and info["scale_m"] == 0.001
+
+
+def test_a_snapshot_opens_the_node_only_for_itself_and_closes_it(monkeypatch, tap):
+    """The defect: a snapshot leaving the depth node open, so the next switch to rs_depth
+    finds it busy. Also: the first frames after STREAMON are skipped."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    frames = [np.full((2, 2), v, np.uint16) for v in (9, 9, 100, 100, 100)]
+    cam = _FakeDepth(frames)
+    monkeypatch.setattr(camera_source, "open_depth", lambda tap=None: cam)
+    _png, info = camera_source.depth_snapshot(3)
+    assert cam.closed and info["source"] == "private"
+    assert not tap.lock.locked()
+
+
+def test_a_snapshot_shares_the_running_depth_stream(monkeypatch, tap):
+    """The defect: a snapshot opening the depth node while rs_depth is the selected camera —
+    the node takes one reader, so it would fail, or break the live picture."""
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+
+    def boom(tap=None):
+        raise AssertionError("opened the node while the stream had it")
+    monkeypatch.setattr(camera_source, "open_depth", boom)
+    tap.attach()
+    stop = threading.Event()
+
+    def stream():
+        while not stop.is_set():
+            tap.put(np.full((2, 2), 800, np.uint16))
+            time.sleep(0.01)
+    t = threading.Thread(target=stream, daemon=True)
+    t.start()
+    try:
+        _png, info = camera_source.depth_snapshot(4)
+    finally:
+        stop.set()
+        t.join()
+    assert info["source"] == "stream" and info["frames"] == 4
+
+
+def test_a_switch_to_depth_waits_for_a_snapshot_holding_the_node(monkeypatch, tap):
+    """The defect: the operator picks rs_depth during a snapshot, the open hits a busy node
+    and the switch falls back to front for no reason. It must wait the second out."""
+    opened = []
+    monkeypatch.setattr(camera_source, "open_depth",
+                        lambda tap=None: opened.append(time.monotonic()) or _FakeDepth([]))
+    tap.lock.acquire()
+    released = []
+
+    def release():
+        time.sleep(0.3)
+        released.append(time.monotonic())
+        tap.lock.release()
+    threading.Thread(target=release, daemon=True).start()
+    camera_source.open_camera("rs_depth", None)
+    assert opened and opened[0] >= released[0]

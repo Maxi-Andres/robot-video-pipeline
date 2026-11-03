@@ -111,6 +111,9 @@ export OPENBLAS_NUM_THREADS=1
 export MAXFPS="${MAXFPS:-15}"
 export CAMERA="${CAMERA:-front}"
 export CAMERA_PORT="${CAMERA_PORT:-8094}"
+# GET /depth on camera_source: one picture in millimetres, on request. 1 on the G1 (its grasp
+# measures the bottle with it); 0 on the Go2, whose uplink is a shared LTE SIM.
+export DEPTH_SNAPSHOT="${DEPTH_SNAPSHOT:-0}"
 PUBLISH_HOST="${PUBLISH_HOST:-${SRT_HOST:?set PUBLISH_HOST to the machine running mediamtx}}"
 PROTO="${PROTO:-rtmp}"
 STREAM="${STREAM:-robot}"

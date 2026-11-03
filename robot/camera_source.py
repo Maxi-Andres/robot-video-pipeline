@@ -22,7 +22,8 @@ LTE SIM and two streams would roughly double it (see robot-splunk-docs/MEDICIONE
 
 Control: GET/POST http://127.0.0.1:$CAMERA_PORT/camera, LOCALHOST ONLY, for the same reason
 mjpeg_server's /config is — the relay is the authenticated surface and calls this from the
-robot itself. Nothing on the network can reach it.
+robot itself. Nothing on the network can reach it. GET /depth (same rules, off unless
+DEPTH_SNAPSHOT=1) is one depth picture in millimetres, for measuring rather than viewing.
 
 TWO READ PATHS, ONE PER STREAM, measured on the Go2 2026-10-14:
 
@@ -101,6 +102,16 @@ CV_THREADS = int(os.environ.get("CAMERA_CV_THREADS", "1"))
 # distance, so a wider scale spends most of the colours on noise.
 DEPTH_MIN_MM = int(os.environ.get("DEPTH_MIN_MM", "300"))
 DEPTH_MAX_MM = int(os.environ.get("DEPTH_MAX_MM", "4000"))
+# GET /depth: the depth in MILLIMETRES, one picture on request, for the PC to measure where a thing
+# is (the bottle a grasp is for). The stream above is colours — fine to steer by, useless to
+# measure with. OFF unless DEPTH_SNAPSHOT=1, and that is per robot on purpose: one snapshot is a
+# ~0.5 MB PNG, nothing on the G1's wireless and real money on the Go2's shared LTE SIM, which also
+# has no arm to grasp with. Nothing is streamed either way: a snapshot is taken only when asked.
+DEPTH_SNAPSHOT = os.environ.get("DEPTH_SNAPSHOT", "0") == "1"
+# A snapshot is the per-pixel median of this many frames (zeros ignored): one D435 frame has
+# speckle and holes that move frame to frame; the median keeps edges where they are.
+DEPTH_SNAPSHOT_FRAMES = int(os.environ.get("DEPTH_SNAPSHOT_FRAMES", "5"))
+DEPTH_SNAPSHOT_MAX_FRAMES = 15
 # How long a POST waits for the switch to land before answering. Opening the RealSense takes
 # about a second; the answer must still fit inside the relay's and the executor's timeouts.
 SWITCH_WAIT_S = float(os.environ.get("CAMERA_SWITCH_WAIT_S", "3"))
@@ -431,9 +442,10 @@ def _legend(img, lo_mm, hi_mm):
 
 
 class RealSenseDepth:
-    def __init__(self):
+    def __init__(self, tap=None):
         lib = _librs()
         _imaging()
+        self._tap = tap
         self._ctx = self._pipe = self._cfg = self._profile = None
         try:
             self._ctx = _call(lib.rs2_create_context, _call(lib.rs2_get_api_version))
@@ -451,8 +463,15 @@ class RealSenseDepth:
         except CameraError:
             self.close()
             raise
+        if tap is not None:
+            tap.attach()
 
     def read(self, timeout):
+        z = self.read_raw(timeout)
+        return None if z is None else encode_jpeg_like_front(colorize_depth(smooth_depth(z)))
+
+    def read_raw(self, timeout):
+        """One depth frame, uint16 millimetres at the captured size, or None on a timeout."""
         lib = _lib
         np, _cv2 = _imaging()
         frames = _P()
@@ -474,9 +493,14 @@ class RealSenseDepth:
         finally:
             lib.rs2_release_frame(frames)
         z = raw.view(np.uint16).reshape(h, stride // 2)[:, :w]
-        return encode_jpeg_like_front(colorize_depth(smooth_depth(z)))
+        if self._tap is not None:
+            self._tap.put(z)
+        return z
 
     def close(self):
+        if self._tap is not None:
+            self._tap.detach()
+            self._tap = None
         lib = _lib
         if self._profile:
             try:
@@ -596,10 +620,11 @@ class V4L2Depth:
     Struct offsets are those of a 64-bit kernel (the Jetson's aarch64, and x86_64).
     """
 
-    def __init__(self):
+    def __init__(self, tap=None):
         import fcntl
         import mmap
         np, _cv2 = _imaging()
+        self._tap = tap
         self._fcntl, self._np = fcntl, np
         index = int(os.environ.get("RS_DEPTH_DEVICE", "-1"))
         if index < 0:
@@ -632,6 +657,8 @@ class V4L2Depth:
         except OSError as exc:
             self.close()
             raise CameraError(f"/dev/video{index}: {exc.strerror or exc}") from None
+        if tap is not None:
+            tap.attach()
 
     @staticmethod
     def _buf(index):
@@ -641,6 +668,11 @@ class V4L2Depth:
         return b
 
     def read(self, timeout):
+        z = self.read_raw(timeout)
+        return None if z is None else encode_jpeg_like_front(colorize_depth(smooth_depth(z)))
+
+    def read_raw(self, timeout):
+        """One depth frame, uint16 millimetres at the captured size, or None (timeout, short)."""
         if not select.select([self._fd], [], [], timeout)[0]:
             return None
         b = self._buf(0)
@@ -659,9 +691,14 @@ class V4L2Depth:
         self._fcntl.ioctl(self._fd, VIDIOC_QBUF, b)
         if z is None:
             return None                              # a short frame: skip it, never show half
-        return encode_jpeg_like_front(colorize_depth(smooth_depth(z)))
+        if self._tap is not None:
+            self._tap.put(z)
+        return z
 
     def close(self):
+        if self._tap is not None:
+            self._tap.detach()
+            self._tap = None
         if self._fd is None:
             return
         try:
@@ -674,6 +711,128 @@ class V4L2Depth:
         self._maps = []
         os.close(self._fd)
         self._fd = None
+
+
+# --------------------------------------------------------------------------- #
+# GET /depth — raw millimetres, one snapshot on request
+# --------------------------------------------------------------------------- #
+class DepthTap:
+    """The raw frames of the depth camera the MAIN LOOP has open, for a snapshot to share.
+
+    The depth node can be opened by one reader at a time. So a snapshot either takes frames
+    from the stream that is already running (rs_depth selected: this tap), or, when it is not,
+    opens the node itself for the second it needs. `lock` is who may OPEN the node: the main
+    loop takes it to open rs_depth, a snapshot holds it for its private read — so a switch to
+    rs_depth during a snapshot waits for it instead of failing on a busy node."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self._cv = threading.Condition()
+        self._frame = None
+        self._seq = 0
+        self.live = False
+
+    def attach(self):
+        with self._cv:
+            self.live, self._frame = True, None
+
+    def detach(self):
+        with self._cv:
+            self.live, self._frame = False, None
+            self._cv.notify_all()
+
+    def put(self, z):
+        with self._cv:
+            self._frame = z
+            self._seq += 1
+            self._cv.notify_all()
+
+    def frames(self, n, timeout):
+        """The next `n` frames of the running stream ([] if it stopped or ran out of time)."""
+        out, deadline = [], time.monotonic() + timeout
+        with self._cv:
+            seen = self._seq
+            while len(out) < n and self.live:
+                left = deadline - time.monotonic()
+                if left <= 0 or not self._cv.wait_for(
+                        lambda seen=seen: self._seq != seen or not self.live, left):
+                    break
+                if self.live and self._seq != seen:
+                    out.append(self._frame)
+                    seen = self._seq
+        return out
+
+
+DEPTH_TAP = DepthTap()
+
+
+def open_depth(tap=None):
+    return V4L2Depth(tap) if DEPTH_BACKEND == "v4l2" else RealSenseDepth(tap)
+
+
+def median_depth(frames):
+    """Per-pixel median of uint16 frames, a 0 (no reading) not counted. A pixel with readings
+    in fewer than half the frames stays 0: a value seen once is more likely speckle than a
+    surface, and the PC must be able to tell "no reading" from a distance."""
+    np, _cv2 = _imaging()
+    stack = np.stack(frames).astype(np.float32)
+    valid = stack > 0
+    stack[~valid] = np.nan
+    with np.errstate(all="ignore"):
+        med = np.nanmedian(stack, axis=0)
+    med[valid.sum(axis=0) * 2 < len(frames)] = 0
+    return np.nan_to_num(med).astype(np.uint16)
+
+
+def depth_snapshot(n):
+    """(PNG bytes of a 16-bit millimetre image, info dict), or CameraError.
+
+    The frames come from the running stream when rs_depth is selected, otherwise from the node
+    opened just for this — never both, see DepthTap. Never colourised, never resized: what
+    comes out is what the sensor measured, at its capture size."""
+    _np, cv2 = _imaging()
+    n = max(1, min(DEPTH_SNAPSHOT_MAX_FRAMES, n))
+    wait_s = n / rs_fps(RS_FPS) + 2.0
+    frames, source = [], "stream"
+    if DEPTH_TAP.live:
+        frames = DEPTH_TAP.frames(n, wait_s)
+    if not frames:
+        source = "private"
+        if not DEPTH_TAP.lock.acquire(timeout=3):
+            raise CameraError("the depth camera is being opened by a switch; try again")
+        try:
+            if DEPTH_TAP.live:              # the switch landed while this waited for the lock
+                source = "stream"
+                frames = DEPTH_TAP.frames(n, wait_s)
+            else:
+                cam = open_depth()
+                try:
+                    deadline = time.monotonic() + wait_s
+                    # The first frames after STREAMON can be from the auto-exposure settling.
+                    skip = 2
+                    while len(frames) < n and time.monotonic() < deadline:
+                        z = cam.read_raw(0.5)
+                        if z is None:
+                            continue
+                        if skip:
+                            skip -= 1
+                            continue
+                        frames.append(z)
+                finally:
+                    cam.close()
+        finally:
+            DEPTH_TAP.lock.release()
+    if not frames:
+        raise CameraError("no depth frame arrived")
+    z = median_depth(frames)
+    ok, png = cv2.imencode(".png", z)
+    if not ok:
+        raise CameraError("PNG encode failed")
+    info = {"width": int(z.shape[1]), "height": int(z.shape[0]), "frames": len(frames),
+            "source": source, "valid": round(float((z > 0).mean()), 3),
+            # The D400 default depth unit; the PC multiplies by it instead of assuming.
+            "scale_m": 0.001, "time": round(time.time(), 3)}
+    return png.tobytes(), info
 
 
 # --------------------------------------------------------------------------- #
@@ -728,7 +887,13 @@ def open_camera(name, front_cmd):
     if name == "front":
         return CommandCamera(front_cmd, "front")
     if name == "rs_depth":
-        return V4L2Depth() if DEPTH_BACKEND == "v4l2" else RealSenseDepth()
+        # Never while a snapshot has the node open (see DepthTap): wait for it to finish.
+        if not DEPTH_TAP.lock.acquire(timeout=5):
+            raise CameraError("the depth node is held by a snapshot")
+        try:
+            return open_depth(DEPTH_TAP)
+        finally:
+            DEPTH_TAP.lock.release()
     index = int(os.environ.get("RS_COLOR_DEVICE", "-1"))
     if index < 0:
         index = find_realsense_color_node()
@@ -805,10 +970,42 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
-        if self.path.split("?")[0].rstrip("/") != "/camera":
+        path = self.path.split("?")[0].rstrip("/")
+        if path == "/depth":
+            return self._depth()
+        if path != "/camera":
             return self.send_error(404)
         if self._local():
             self._json(200, SELECTOR.status())
+
+    def _depth(self):
+        """GET /depth?frames=N -> image/png, 16-bit, millimetres; the facts in X-Depth-Info."""
+        if not self._local():
+            return None
+        if not DEPTH_SNAPSHOT:
+            return self._json(404, {"ok": False, "error": "depth snapshots are off on this robot "
+                                                          "(DEPTH_SNAPSHOT=1 in video.env)"})
+        if "rs_depth" not in CAMERAS:
+            return self._json(404, {"ok": False, "error": "this robot has no depth camera"})
+        from urllib.parse import parse_qs, urlparse
+        try:
+            n = int(parse_qs(urlparse(self.path).query).get("frames",
+                                                            [DEPTH_SNAPSHOT_FRAMES])[0])
+        except ValueError:
+            return self._json(400, {"ok": False, "error": "frames must be an integer"})
+        try:
+            png, info = depth_snapshot(n)
+        except CameraError as exc:
+            return self._json(503, {"ok": False, "error": str(exc)})
+        log(f"depth snapshot: {info['frames']} frames from the {info['source']} reader, "
+            f"{info['valid']:.0%} valid, {len(png)} bytes")
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(png)))
+        self.send_header("X-Depth-Info", json.dumps(info))
+        self.end_headers()
+        self.wfile.write(png)
+        return None
 
     def do_POST(self):
         """POST /camera {"camera": "front"|"rs_color"|"rs_depth"} — answers once it took."""
